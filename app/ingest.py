@@ -18,7 +18,7 @@ from .providers import ProviderError, embed_model_label, get_provider
 
 PRODUCT_TEXT_SQL = """
 SELECT p.sku, p.name, p.brand, p.category, p.description,
-       a.suitable_skin_types, a.target_concerns, a.texture,
+       a.suitable_skin_types, a.target_concerns, a.texture, a.key_benefits, a.min_age, a.max_age,
        COALESCE((SELECT string_agg(i.inci_name, ', ' ORDER BY pi.position)
                  FROM product_ingredients pi JOIN ingredients i ON i.id = pi.ingredient_id
                  WHERE pi.sku = p.sku), '') AS ingredients
@@ -34,12 +34,25 @@ def product_text(r: dict) -> str:
         r["description"],
         "skin types: " + ", ".join(r.get("suitable_skin_types") or []),
         "concerns: " + ", ".join(r.get("target_concerns") or []),
+        "benefits: " + "; ".join(r.get("key_benefits") or []),
+        _ages(r.get("min_age"), r.get("max_age")),
         f"texture {r.get('texture') or ''}", "ingredients: " + r["ingredients"],
     ] if x)
 
 
-def embed_products(reembed: bool = False) -> int:
-    provider = get_provider()
+def _ages(lo, hi) -> str:
+    if lo and hi:
+        return f"ages {lo}-{hi}"
+    return f"ages {lo}+" if lo else (f"up to age {hi}" if hi else "")
+
+
+class EmbedError(RuntimeError):
+    pass
+
+
+def embed_products(reembed: bool = False, provider=None) -> int:
+    """Embed products without a vector (or all with reembed). Raises ProviderError / EmbedError."""
+    provider = provider or get_provider()
     with connect() as conn:
         rows = conn.execute(PRODUCT_TEXT_SQL.format(where="" if reembed else "AND p.embedding IS NULL")).fetchall()
         if not rows:
@@ -47,13 +60,10 @@ def embed_products(reembed: bool = False) -> int:
             return 0
         texts = [product_text(r) for r in rows]
         print(f"Embedding {len(rows)} products with {provider.name}:{embed_model_label()} ...")
-        try:
-            vecs = provider.embed(texts, kind="document")
-        except ProviderError as e:
-            sys.exit(f"ERROR: {e}")
+        vecs = provider.embed(texts, kind="document")
         if len(vecs[0]) != settings.embed_dim:
-            sys.exit(f"Embedding size {len(vecs[0])} != EMBED_DIM {settings.embed_dim}. "
-                     f"Set EMBED_DIM to {len(vecs[0])} in .env and re-run --init on an empty DB, or pick another model.")
+            raise EmbedError(f"Embedding size {len(vecs[0])} != EMBED_DIM {settings.embed_dim}. "
+                             f"Set EMBED_DIM to {len(vecs[0])} in .env and re-run --init on an empty DB, or pick another model.")
         with conn.cursor() as cur:
             for r, v in zip(rows, vecs):
                 cur.execute("UPDATE products SET embedding = %s, embedded_with = %s, updated_at = now() WHERE sku = %s",
@@ -79,7 +89,10 @@ def main() -> None:
         run_sql_file("seed_sample.sql")
         print("Sample catalog loaded.")
     if a.embed or a.reembed:
-        embed_products(reembed=a.reembed)
+        try:
+            embed_products(reembed=a.reembed)
+        except (ProviderError, EmbedError) as e:
+            sys.exit(f"ERROR: {e}")
 
 
 if __name__ == "__main__":

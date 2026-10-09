@@ -35,6 +35,7 @@ SELECT p.sku, p.name, p.brand, p.category, p.routine_step,
              AND (br.valid_to   IS NULL OR br.valid_to   >= current_date)
             THEN br.campaign_boost::float ELSE 0 END AS campaign_boost,
        a.suitable_skin_types, a.target_concerns, a.fragrance_free,
+       a.min_age, a.max_age, a.key_benefits,
        COALESCE(ing.inci, '{}') AS key_ingredients,
        1 - (p.embedding <=> %(qvec)s) AS similarity
 FROM products p
@@ -47,7 +48,7 @@ LEFT JOIN LATERAL (
 ) ing ON TRUE
 WHERE p.is_active
   AND NOT COALESCE(br.excluded, FALSE)
-  AND p.stock_qty > 0
+  AND (p.stock_qty IS NULL OR p.stock_qty > 0)
   AND p.embedding IS NOT NULL
   AND p.price BETWEEN %(pmin)s AND %(pmax)s
   AND (%(skin)s::text IS NULL OR %(skin)s::text = ANY(a.suitable_skin_types))
@@ -88,9 +89,9 @@ def log_recommendation(conn, *, employee_id, request, profile, candidates, picks
     return row["id"]
 
 
-def save_feedback(conn, log_id: int, feedback: str, note: str | None) -> bool:
+def save_feedback(conn, log_id: int, feedback: str, note: str | None, sku: str | None = None) -> bool:
     cur = conn.execute(
-        "UPDATE recommendation_log SET feedback = %s, feedback_note = %s WHERE id = %s",
-        (feedback, note, log_id),
+        "UPDATE recommendation_log SET feedback = %s, feedback_note = %s, feedback_sku = %s WHERE id = %s",
+        (feedback, note, sku, log_id),
     )
     return cur.rowcount == 1

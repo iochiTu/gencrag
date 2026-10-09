@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 SKIN_TYPES = ["dry", "oily", "combination", "normal"]
 CONCERNS = ["acne", "dryness", "redness", "pigmentation", "wrinkles", "pores", "dullness", "oiliness"]
 AVOID = ["pregnancy", "fragrance", "retinoid", "aha", "bha", "alcohol", "essential_oil"]
-CATEGORIES = ["cleanser", "toner", "essence", "serum", "cream", "sunscreen", "mask"]
+CATEGORIES = ["cleanser", "toner", "essence", "serum", "cream", "sunscreen", "mask", "other"]
+ROUTINE_STEP = {"cleanser": 1, "toner": 2, "essence": 3, "serum": 3, "cream": 5, "sunscreen": 6, "mask": 7, "other": 8}
 
 # An avoid item can imply ingredient flags that must also be excluded
 AVOID_EXPANSION = {"pregnancy": ["retinoid"]}
@@ -25,6 +26,7 @@ class CustomerProfile(BaseModel):
     budget_min: float = 0
     budget_max: Optional[float] = Field(None, description="Max price per item, in the database currency")
     categories: list[str] = Field(default_factory=list)
+    age: Optional[int] = Field(None, ge=10, le=100)
     note: str = ""
 
     @field_validator("concerns")
@@ -53,11 +55,13 @@ class RecommendRequest(BaseModel):
     profile: Optional[CustomerProfile] = None
     text: Optional[str] = Field(None, description="Free-text note from the employee")
     employee_id: Optional[str] = None
-    top_n: int = Field(4, ge=1, le=6)
+    top_n: int = Field(4, ge=1, le=6, description="Number of routine steps")
+    options: Optional[int] = Field(None, ge=1, le=4, description="Options per step; default from admin settings")
     debug: bool = False
 
 
 class FeedbackRequest(BaseModel):
     log_id: int
     feedback: Literal["accepted", "swapped", "sold", "rejected"]
+    sku: Optional[str] = Field(None, description="The option that was sold or chosen")
     note: Optional[str] = None

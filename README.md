@@ -63,7 +63,7 @@ If you have less GPU memory, set `OLLAMA_CHAT_MODEL=qwen3.5:4b` in `.env` (and `
 
 - Point `DATABASE_URL` at your PostgreSQL and run `python -m app.ingest --init` (creates the tables
   if they don't exist; needs the `vector` extension: `CREATE EXTENSION vector;`).
-- Fill `products`, `product_attributes`, `ingredients`, `product_ingredients`, `business_rules`,
+- Easiest: import products from Excel in the admin portal (section 5). Or fill `products`, `product_attributes`, `ingredients`, `product_ingredients`, `business_rules`,
   `skin_concern_map` from your ERP / PIM (a nightly SQL job or ETL). If your tables already exist,
   create SQL **views** with these names and columns instead of copying data.
 - **Don't** run `--seed` on a real database: it wipes the product tables.
@@ -86,16 +86,51 @@ Every change is written to the change log with the name and time.
 
 | Tab | What managers can do |
 | --- | --- |
-| Ranking strategy | Pick a preset (Customer first, Balanced, Profit focus, Push priority products) or move two sliders: **Customer fit vs. Business value** (max 70% business) and **Profit margin vs. Product priority**. Optional guard: minimum skin match. Turn the AI step on/off. **Preview** a test customer under the saved vs. new strategy before saving. Changes apply to the next recommendation, no restart. |
-| Priorities & campaigns | Per product: priority 1-5, campaign boost with start/end dates, hide from recommendations. Shows margin, stock, and how often each product was shown/sold in 30 days. |
+| Ranking strategy | Pick a preset (Customer first, Balanced, Profit focus, Push priority products) or move two sliders: **Customer fit vs. Business value** (max 70% business) and **Profit margin vs. Product priority**. Choices per step (1-4). Optional guard: minimum skin match. Turn the AI step on/off. **Preview** a test customer under the saved vs. new strategy before saving. Changes apply to the next recommendation, no restart. |
+| Import products | Upload an Excel or CSV file, check what will change, import. See section 5. |
+| Products & campaigns | Per product: priority 1-5, campaign boost with start/end dates, hide. Click a product to see what the AI read from its description and correct it. Filter "Only products to check". |
 | Activity & feedback | Recommendations, staff using it, feedback rate, sold and "not suitable" rates, average margin of recommended products vs. catalog, top products, recent recommendations, change log. |
 
-Upgrading an existing database from the first version: run `python -m app.ingest --init` once
-(adds `app_settings`, `admin_audit` and the `excluded` column; existing data is kept).
+Upgrading an existing database from an earlier version: run `python -m app.ingest --init` once
+(adds the new tables and columns; existing data is kept).
 
 For production, put the service behind HTTPS (the login cookie is sent on every request).
 
-## 5. Safety rules built in
+## 5. Updating products from Excel (for operations staff)
+
+Admin portal > **Import products**. No technical knowledge needed.
+
+1. **Fill the sheet.** Required columns: **SKU, Name, Price, Description**. Optional: Cost (needed for
+   margin; without it margin counts as average), Stock (empty = always available), Brand, Category, Active
+   (yes/no). Column names can vary ("Product Code", "Retail Price", "Details" also work).
+   Click *Download Excel template* for a ready sheet with instructions, or see `samples/sample_products.xlsx`.
+2. **Write good descriptions.** The AI reads them. Include what the product does, who it is for (skin types,
+   age such as "ages 25-45", "40+", "teens"), who should avoid it ("not recommended during pregnancy",
+   "not for sensitive skin"), and the full ingredient list after `Ingredients:`.
+3. **Check the file.** Before anything is saved you see new / changed / unchanged products, rows with
+   errors (with their Excel row number) and products in the database that are missing from the file.
+4. **Import.** Products are saved, the AI reads only new or changed descriptions, and the products become
+   searchable. Rows with the same SKU update the existing product.
+5. **Review.** Products marked **check** need a look (e.g. no ingredient list, unclear category).
+   Click a product to see the description, ingredients with their safety flags, and what the recommender
+   uses; correct anything and Save.
+
+What is decided by rules, not the AI: ingredient safety flags (fragrance, retinoids, AHA, BHA, alcohol,
+essential oils) come from the ingredient list; retinoids always mean "avoid in pregnancy"; products
+with strong actives are not marked safe for sensitive skin unless the description says so. The AI can
+add a restriction but never remove one.
+
+Speed: with `qwen3.5:9b` on a GPU, expect a few seconds per product (much slower on CPU); only new or
+changed descriptions are read, so later imports are quick.
+
+## 6. Multiple choices per step
+
+Each routine step (cleanser, toner, serum, ...) shows up to N products (Ranking strategy > *Choices per
+step*, default 3; staff can change it per request). The best match comes first; other options are only
+offered when they score at least 60% of the best one, so staff are not shown weak fillers. Staff can
+click *Customer bought this* on the option that sold; Activity counts sales per product.
+
+## 7. Safety rules built in
 
 - Out of stock, inactive, over budget, wrong skin type, or containing an ingredient the customer
   must avoid (pregnancy also excludes retinoids) -> never shown, whatever the margin.
@@ -104,7 +139,7 @@ For production, put the service behind HTTPS (the login cookie is sent on every 
 - Medical wording ("treats", "cures", "heals") is rewritten.
 - If the model is down or returns bad JSON, a deterministic routine is returned (`used_llm: false`).
 
-## 6. Tests
+## 8. Tests
 
 ```powershell
 pytest -q                                                      # unit tests, no DB needed

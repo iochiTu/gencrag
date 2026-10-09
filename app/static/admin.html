@@ -29,6 +29,8 @@
   .who { margin-left:auto; color:var(--quiet); font-size:13px; }
   .who button { margin-left:8px; }
   main { max-width:1180px; margin:0 auto; padding:24px 16px; }
+  main:has(section[data-panel="products"]:not(.hidden)) { max-width:1480px; }
+  #pTable td:first-child { min-width:180px; } #pTable td:nth-child(2) { min-width:210px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
   h2 { font-size:16px; margin:0 0 4px; } .sub { color:var(--quiet); margin:0 0 16px; font-size:13px; }
   h3 { font-size:14px; margin:20px 0 8px; }
@@ -74,14 +76,32 @@
   .err { color:var(--bad); font-size:13px; margin-top:8px; min-height:18px; }
   .hidden { display:none !important; }
   tr.dirty td { background:var(--warn-bg); }
-  td input[type=date] { width:130px; } td select { min-width:70px; }
+  td input[type=date] { width:128px; } td select { min-width:70px; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:8px 0 16px; }
+  .steps div { border:1px solid var(--line); border-radius:10px; padding:12px; font-size:13px; color:var(--quiet); }
+  .steps b { display:block; color:var(--ink); font-size:14px; margin-bottom:4px; }
+  .drop { display:block; cursor:pointer; margin-top:4px; border:2px dashed var(--line); border-radius:12px; padding:24px; text-align:center; color:var(--quiet); }
+  .drop.over { border-color:var(--accent); background:var(--accent-bg); }
+  .progress { height:10px; background:var(--hover); border-radius:999px; overflow:hidden; margin:12px 0 6px; }
+  .progress div { height:100%; background:var(--accent); width:0; transition:width .4s; }
+  .tag.bad { background:var(--warn-bg); color:var(--ink); }
+  .tag.err { background:var(--bad); color:#fff; }
+  details summary { cursor:pointer; font-weight:600; margin:12px 0 6px; }
+  dialog { border:1px solid var(--line); border-radius:12px; padding:0; width:min(760px, 94vw); background:var(--card); color:var(--ink); }
+  dialog::backdrop { background:rgba(0,0,0,.35); }
+  dialog .body { padding:20px; max-height:80vh; overflow:auto; }
+  dialog .foot { padding:12px 20px; border-top:1px solid var(--line); display:flex; gap:8px; justify-content:flex-end; align-items:center; }
+  .desc { white-space:pre-wrap; background:var(--hover); border-radius:8px; padding:10px 12px; font-size:13px; max-height:180px; overflow:auto; }
+  .checks { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:13px; }
+  .formgrid { display:grid; grid-template-columns:160px 1fr; gap:10px 16px; align-items:start; margin-top:14px; font-size:13px; }
+  .formgrid > b { padding-top:6px; }
 </style>
 </head>
 <body>
 
 <section id="login" class="card hidden">
   <h2>Recommender admin</h2>
-  <p class="sub">Sign in to change ranking, priorities and campaigns.</p>
+  <p class="sub">Sign in to import products and change ranking, priorities and campaigns.</p>
   <form id="loginForm">
     <label for="ln">Your name (for the change log)</label><input id="ln" required maxlength="40" autocomplete="name">
     <label for="lp">Admin password</label><input id="lp" type="password" required autocomplete="current-password">
@@ -95,7 +115,8 @@
   <h1>Recommender admin</h1>
   <nav>
     <button data-tab="ranking" class="on">Ranking strategy</button>
-    <button data-tab="products">Priorities &amp; campaigns</button>
+    <button data-tab="import">Import products</button>
+    <button data-tab="products">Products &amp; campaigns</button>
     <button data-tab="activity">Activity &amp; feedback</button>
   </nav>
   <div class="who"><span id="who"></span><button class="btn" id="logout">Sign out</button></div>
@@ -134,6 +155,9 @@
           <option value="1">All concerns</option>
         </select>
       </label>
+      <label>Choices per step
+        <select id="optsel"><option value="1">1 product</option><option value="2">2 products</option><option value="3">3 products</option><option value="4">4 products</option></select>
+      </label>
       <label><input type="checkbox" id="llm"> Use the AI model to pick and explain (off = rule-based only)</label>
     </div>
     <div class="warn hidden" id="profitWarn">Business value is above 50%. Products that match few of the customer's concerns can now be shown. Consider a minimum skin match, and watch the "Not suitable" rate in Activity: staff stop trusting the tool if picks feel pushy.</div>
@@ -159,17 +183,65 @@
       <div><h3>Saved strategy</h3><div class="scroll"><table id="pvCur"></table></div></div>
       <div><h3>With your changes</h3><div class="scroll"><table id="pvNew"></table></div></div>
     </div>
-    <p class="note hidden" id="pvLegend">Score combines fit, similarity, margin and priority. Rows marked "shown" are the products staff would see (one per category first).</p>
+    <p class="note hidden" id="pvLegend">Score combines fit, similarity, margin and priority. "Best" is the first choice staff see for a routine step, "choice" the other options offered for that step.</p>
   </div>
+</section>
+
+<!-- ============ Import ============ -->
+<section data-panel="import" class="hidden">
+  <div class="card">
+    <h2>Update products from Excel</h2>
+    <p class="sub">Add new products or update existing ones (matched by SKU). The AI reads each new or changed description to work out who the product is for.</p>
+    <div class="steps">
+      <div><b>1. Fill the sheet</b>Required columns: SKU, Name, Price, Description. Optional: Cost (for margin), Stock, Brand, Category, Active.</div>
+      <div><b>2. Check the file</b>You see what will be added or changed, and any rows with problems, before anything is saved.</div>
+      <div><b>3. Import and review</b>Check what the AI understood. Products marked "check" need a quick look.</div>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <button class="btn" id="tmplBtn">Download Excel template</button>
+      <span class="note">The template has two example rows and a "How to fill" sheet.</span>
+    </div>
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept=".xlsx,.xlsm,.csv" class="hidden">
+      <b id="dropText">Drop the Excel or CSV file here, or click to choose it</b>
+    </label>
+    <div class="err" id="impErr"></div>
+  </div>
+
+  <div class="card hidden" id="pvCard">
+    <h2 id="pvTitle">Check before importing</h2>
+    <div class="tiles" id="pvTiles" style="margin:12px 0"></div>
+    <div id="pvIssues"></div>
+    <div id="pvLists"></div>
+    <h3>Options</h3>
+    <label class="note" style="display:block;margin:6px 0"><input type="checkbox" id="optDeact"> <span id="optDeactText">Mark products that are not in this file as inactive</span></label>
+    <label class="note" style="display:block;margin:6px 0"><input type="checkbox" id="optReread"> Re-read every description with the AI, not only new and changed ones (slower)</label>
+    <div class="row" style="margin-top:14px">
+      <button class="btn primary" id="runImport">Import</button>
+      <button class="btn" id="cancelImport">Cancel</button>
+    </div>
+  </div>
+
+  <div class="card hidden" id="runCard">
+    <h2 id="runTitle">Importing</h2>
+    <div class="progress"><div id="bar"></div></div>
+    <div class="note" id="runText"></div>
+    <div class="err" id="runErr"></div>
+    <div class="scroll" style="margin-top:12px"><table id="runTable"></table></div>
+  </div>
+
+  <div class="card"><h2>Recent imports</h2><div class="scroll"><table id="jobsT"></table></div></div>
 </section>
 
 <!-- ============ Products ============ -->
 <section data-panel="products" class="hidden">
   <div class="card">
-    <h2>Priorities &amp; campaigns</h2>
-    <p class="sub">Priority 1 to 5 (3 = normal). A campaign boost adds to the score between its dates. Hidden products are never recommended.</p>
+    <h2>Products &amp; campaigns</h2>
+    <p class="sub">Priority 1 to 5 (3 = normal). A campaign boost adds to the score between its dates. Hidden products are never recommended. Click a product name to see and correct what the AI read from its description.</p>
     <div class="row" style="margin-bottom:12px">
       <input id="pSearch" placeholder="Search name or SKU" style="width:240px">
+      <label class="note"><input type="checkbox" id="pReview"> Only products to check</label>
+      <label class="note"><input type="checkbox" id="pInactive"> Show inactive</label>
       <span class="note" id="pCount"></span>
     </div>
     <div class="scroll"><table id="pTable"></table></div>
@@ -191,6 +263,15 @@
 </section>
 </main>
 </div>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlgForm">
+    <div class="body" id="dlgBody"></div>
+    <div class="foot"><span class="err" id="dlgErr" style="margin:0 auto 0 0"></span>
+      <button class="btn" value="cancel" formnovalidate>Close</button>
+      <button class="btn primary" id="dlgSave" value="default">Save</button></div>
+  </form>
+</dialog>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -223,7 +304,7 @@ $("#logout").onclick = async () => { await api("/logout", {method:"POST"}); show
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll("[data-panel]").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== b.dataset.tab));
-  ({ranking: loadRanking, products: loadProducts, activity: loadActivity})[b.dataset.tab]();
+  ({ranking: loadRanking, import: loadImport, products: loadProducts, activity: loadActivity})[b.dataset.tab]();
 });
 
 /* ---------------- Ranking strategy ---------------- */
@@ -244,7 +325,7 @@ function renderRanking() {
   const s = draft; $("#biz").value = s.business_share; $("#pri").value = s.priority_share;
   $("#fitPct").textContent = (100 - s.business_share) + "%"; $("#bizPct").textContent = s.business_share + "%";
   $("#marPct").textContent = (100 - s.priority_share) + "%"; $("#priPct").textContent = s.priority_share + "%";
-  $("#minfit").value = String(s.min_skin_fit); $("#llm").checked = s.use_llm_rerank;
+  $("#minfit").value = String(s.min_skin_fit); $("#llm").checked = s.use_llm_rerank; $("#optsel").value = String(s.options_per_step);
   document.querySelectorAll(".preset").forEach(b => b.classList.toggle("on", b.dataset.k === s.preset));
   const w = weights(s);
   $("#wbar").innerHTML = W.map(([k,,c]) => `<div style="width:${w[k]*100}%;background:var(${c})" title="${k}: ${pct(w[k])}"></div>`).join("");
@@ -261,6 +342,7 @@ $("#biz").oninput = e => { draft.business_share = +e.target.value; matchPreset()
 $("#pri").oninput = e => { draft.priority_share = +e.target.value; matchPreset(); renderRanking(); };
 $("#minfit").onchange = e => { draft.min_skin_fit = +e.target.value; renderRanking(); };
 $("#llm").onchange = e => { draft.use_llm_rerank = e.target.checked; renderRanking(); };
+$("#optsel").onchange = e => { draft.options_per_step = +e.target.value; renderRanking(); };
 $("#resetRanking").onclick = () => { draft = {...saved}; renderRanking(); };
 $("#saveRanking").onclick = async () => {
   try { await api("/ranking", {method:"PUT", body: JSON.stringify(draft)}); await loadRanking(); }
@@ -282,7 +364,7 @@ $("#runPreview").onclick = async () => {
         if (compare) { const old = curRank[r.sku]; move = old == null ? ' <span class="up">new</span>' : old > r.rank ? ` <span class="up">▲${old - r.rank}</span>` : old < r.rank ? ` <span class="down">▼${r.rank - old}</span>` : ""; }
         return `<tr><td>${r.rank}${move}</td><td>${esc(r.name)}<div class="note">${esc(r.sku)} · ${esc(r.category)} · ${money(r.price)}</div></td>
           <td class="num">${r.score.toFixed(3)}</td><td class="num">${pct(r.skin_fit)}</td><td class="num">${pct(r.margin_pct)}</td>
-          <td class="num">${r.priority}${r.campaign_boost ? "+" : ""}</td><td>${r.picked ? '<span class="tag on">shown</span>' : ""}</td></tr>`; }).join("")
+          <td class="num">${r.priority}${r.campaign_boost ? "+" : ""}</td><td>${r.picked === "first" ? '<span class="tag on">best</span>' : r.picked === "alt" ? '<span class="tag">choice</span>' : ""}</td></tr>`; }).join("")
       : `<tr><td colspan="7" class="note">No product passes the filters for this customer.</td></tr>`) + "</tbody>";
     $("#pvCur").innerHTML = table(d.current, false); $("#pvNew").innerHTML = table(d.proposed, true);
     $("#pvOut").classList.remove("hidden"); $("#pvLegend").classList.remove("hidden");
@@ -295,16 +377,19 @@ let PRODUCTS = [];
 const BOOSTS = [[0,"None"],[0.03,"Small +0.03"],[0.06,"Medium +0.06"],[0.1,"Large +0.10"],[0.15,"Max +0.15"]];
 async function loadProducts() { const d = await api("/products"); CURRENCY = d.currency; PRODUCTS = d.products; renderProducts(); }
 function renderProducts() {
-  const q = $("#pSearch").value.trim().toLowerCase();
-  const rows = PRODUCTS.filter(p => !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
-  $("#pCount").textContent = `${rows.length} of ${PRODUCTS.length} products`;
-  $("#pTable").innerHTML = `<thead><tr><th>Product</th><th class="num">Price</th><th class="num">Margin</th><th class="num">Stock</th>
+  const q = $("#pSearch").value.trim().toLowerCase(), onlyReview = $("#pReview").checked, showInactive = $("#pInactive").checked;
+  const rows = PRODUCTS.filter(p => (!q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q))
+                                 && (!onlyReview || p.needs_review) && (showInactive || p.is_active));
+  const toCheck = PRODUCTS.filter(p => p.needs_review && p.is_active).length;
+  $("#pCount").textContent = `${rows.length} of ${PRODUCTS.length} products` + (toCheck ? ` · ${toCheck} to check` : "");
+  $("#pTable").innerHTML = `<thead><tr><th>Product</th><th>AI reading</th><th class="num">Price</th><th class="num">Margin</th><th class="num">Stock</th>
     <th>Priority</th><th>Campaign boost</th><th>From</th><th>To</th><th>Hide</th><th class="num">Shown 30d</th><th class="num">Sold 30d</th><th></th></tr></thead><tbody>` +
     rows.map(p => {
       const boostOpts = BOOSTS.some(([v]) => v === p.campaign_boost) ? BOOSTS : [...BOOSTS, [p.campaign_boost, "+" + p.campaign_boost]];
       return `<tr data-sku="${esc(p.sku)}">
-      <td>${esc(p.name)}<div class="note">${esc(p.sku)} · ${esc(p.category)}${p.boost_active ? ' · <span class="tag on">campaign live</span>' : ""}${!p.is_active ? ' · <span class="tag">inactive</span>' : ""}</div></td>
-      <td class="num">${money(p.price)}</td><td class="num">${pct(p.margin_pct)}</td><td class="num">${p.stock_qty}</td>
+      <td><a href="#" data-detail="${esc(p.sku)}">${esc(p.name)}</a><div class="note">${esc(p.sku)} · ${esc(p.category)}${p.boost_active ? ' · <span class="tag on">campaign live</span>' : ""}${!p.is_active ? ' · <span class="tag">inactive</span>' : ""}${!p.searchable && p.is_active ? ' · <span class="tag bad">not searchable</span>' : ""}</div></td>
+      <td class="note" style="max-width:240px">${reading(p)}</td>
+      <td class="num">${money(p.price)}</td><td class="num">${pct(p.margin_pct)}</td><td class="num">${p.stock_qty ?? "–"}</td>
       <td><select data-f="priority">${[1,2,3,4,5].map(n => `<option ${n===p.priority?"selected":""} value="${n}">${n}${n===3?" (normal)":n===5?" (top)":""}</option>`).join("")}</select></td>
       <td><select data-f="campaign_boost">${boostOpts.map(([v,l]) => `<option ${v===p.campaign_boost?"selected":""} value="${v}">${l}</option>`).join("")}</select></td>
       <td><input type="date" data-f="valid_from" value="${p.valid_from ?? ""}"></td>
@@ -313,7 +398,14 @@ function renderProducts() {
       <td class="num">${p.recommended_30d}</td><td class="num">${p.sold_30d}</td>
       <td><button class="btn primary" data-save disabled>Save</button></td></tr>`; }).join("") + "</tbody>";
 }
-$("#pSearch").oninput = renderProducts;
+$("#pSearch").oninput = renderProducts; $("#pReview").onchange = renderProducts; $("#pInactive").onchange = renderProducts;
+function ages(lo, hi) { return lo && hi ? `ages ${lo}-${hi}` : lo ? `ages ${lo}+` : hi ? `up to ${hi}` : ""; }
+function reading(p) {
+  const bits = [(p.suitable_skin_types || []).join(", "), (p.target_concerns || []).join(", "), ages(p.min_age, p.max_age),
+                (p.avoid_for || []).length ? "avoid: " + p.avoid_for.join(", ") : ""].filter(Boolean);
+  return (p.needs_review ? `<span class="tag bad" title="${esc(p.review_note || "")}">check</span> ` : "") + esc(bits.join(" · ") || "–");
+}
+$("#pTable").addEventListener("click", e => { const a = e.target.closest("[data-detail]"); if (!a) return; e.preventDefault(); openDetail(a.dataset.detail); });
 $("#pTable").addEventListener("input", e => { const tr = e.target.closest("tr[data-sku]"); if (!tr) return; tr.classList.add("dirty"); tr.querySelector("[data-save]").disabled = false; });
 $("#pTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-save]"); if (!b) return;
@@ -356,6 +448,129 @@ async function loadActivity() {
       <td class="note">${fmt(c.area, c.old_value)}</td><td>${fmt(c.area, c.new_value)}</td></tr>`).join("")
       : `<tr><td colspan="5" class="note">No changes yet.</td></tr>`) + "</tbody>";
 }
+
+/* ---------------- Product details (what the AI read) ---------------- */
+let DETAIL = null;
+const CONCERN_L = {acne:"Breakouts",dryness:"Dryness",redness:"Redness",pigmentation:"Dark spots",wrinkles:"Fine lines",pores:"Pores",dullness:"Dullness",oiliness:"Excess oil"};
+const AVOID_L = {pregnancy:"Pregnancy / nursing",fragrance:"Fragrance",retinoid:"Retinoids",aha:"AHA",bha:"BHA",alcohol:"Alcohol",essential_oil:"Essential oils"};
+const checks = (name, all, on, labels = {}) => `<div class="checks">${all.map(v =>
+  `<label><input type="checkbox" name="${name}" value="${v}" ${on.includes(v) ? "checked" : ""}> ${esc(labels[v] || v)}</label>`).join("")}</div>`;
+async function openDetail(sku) {
+  $("#dlgErr").textContent = "";
+  const d = await api("/products/" + encodeURIComponent(sku)); DETAIL = d; const p = d.product, v = d.vocab;
+  $("#dlgBody").innerHTML = `<h2>${esc(p.name)}</h2>
+    <p class="sub">${esc(p.sku)} · ${money(p.price)}${p.cost != null ? " · cost " + money(p.cost) : ""} · read by ${esc(p.extracted_by || "–")}
+      ${p.needs_review ? `<br><span class="tag bad">check</span> ${esc(p.review_note || "")}` : ""}</p>
+    <h3>Description (from the Excel file)</h3><div class="desc">${esc(p.description)}</div>
+    <h3>Ingredients and safety flags</h3>
+    <div class="note">${(p.ingredients || []).length ? p.ingredients.map(i => esc(i.inci_name) + (i.flags.length ? ` <span class="tag bad">${esc(i.flags.join(", "))}</span>` : "")).join(", ") : "No ingredient list found. Allergy filters cannot check this product; add \"Ingredients: ...\" to the description."}</div>
+    <h3>What the recommender uses (edit if the AI got it wrong)</h3>
+    <div class="formgrid">
+      <b>Category</b><select name="category">${v.categories.map(c => `<option ${c === p.category ? "selected" : ""}>${c}</option>`).join("")}</select>
+      <b>Skin types</b>${checks("skin", v.skin_types, p.suitable_skin_types || [])}
+      <b>Concerns</b>${checks("concern", v.concerns, p.target_concerns || [], CONCERN_L)}
+      <b>Not for customers who avoid</b>${checks("avoid", v.avoid, p.avoid_for || [], AVOID_L)}
+      <b>Age range</b><div class="row"><input type="number" name="min_age" min="10" max="100" placeholder="From" value="${p.min_age ?? ""}" style="width:90px"> to <input type="number" name="max_age" min="10" max="100" placeholder="To" value="${p.max_age ?? ""}" style="width:90px"></div>
+      <b>Key benefits</b><div><textarea name="benefits" rows="3">${esc((p.key_benefits || []).join("\n"))}</textarea><div class="note">One per line. Staff see these on each recommendation.</div></div>
+      <b>Active</b><label><input type="checkbox" name="active" ${p.is_active ? "checked" : ""}> Recommend this product</label>
+    </div>`;
+  $("#dlg").showModal();
+}
+$("#dlgSave").onclick = async e => {
+  e.preventDefault();
+  const f = $("#dlgForm"), all = n => [...f.querySelectorAll(`input[name="${n}"]:checked`)].map(i => i.value), num = n => f.querySelector(`[name="${n}"]`).value;
+  const body = {category: f.querySelector('[name="category"]').value, suitable_skin_types: all("skin"), target_concerns: all("concern"),
+    avoid_for: all("avoid"), min_age: num("min_age") ? +num("min_age") : null, max_age: num("max_age") ? +num("max_age") : null,
+    key_benefits: f.querySelector('[name="benefits"]').value.split("\n"), is_active: f.querySelector('[name="active"]').checked};
+  try {
+    const r = await api("/products/" + encodeURIComponent(DETAIL.product.sku) + "/attributes", {method:"PUT", body: JSON.stringify(body)});
+    if (r.warning) { $("#dlgErr").textContent = r.warning; } else { $("#dlg").close(); }
+    loadProducts();
+  } catch (err) { $("#dlgErr").textContent = err.message; }
+};
+
+/* ---------------- Import ---------------- */
+let JOB = null, POLL = null;
+const ACTION = {created:"New", updated:"Updated", unchanged:"No change", failed:"Failed"};
+async function loadImport() {
+  const d = await api("/import");
+  $("#jobsT").innerHTML = `<thead><tr><th>When</th><th>By</th><th>File</th><th>Status</th><th class="num">New</th><th class="num">Updated</th><th class="num">Descriptions read</th><th class="num">To check</th></tr></thead><tbody>` +
+    (d.jobs.length ? d.jobs.map(j => { const c = (j.summary || {}).counts || {};
+      return `<tr><td>${when(j.created_at)}</td><td>${esc(j.created_by)}</td><td>${esc(j.filename)}</td>
+      <td>${j.status === "done" ? '<span class="tag on">done</span>' : j.status === "running" ? `running ${j.done}/${j.total}` : `<span class="tag err" title="${esc(j.error || "")}">${esc(j.status)}</span>`}</td>
+      <td class="num">${c.created ?? "–"}</td><td class="num">${c.updated ?? "–"}</td><td class="num">${c.analyzed ?? "–"}</td><td class="num">${c.needs_review ?? "–"}</td></tr>`; }).join("")
+      : `<tr><td colspan="8" class="note">No imports yet.</td></tr>`) + "</tbody>";
+}
+$("#tmplBtn").onclick = async () => {
+  const r = await fetch("/admin/api/import/template"); if (!r.ok) { $("#impErr").textContent = "Could not download the template."; return; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(await r.blob()); a.download = "product-import-template.xlsx"; a.click();
+};
+const drop = $("#drop");
+["dragover","dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove("over")));
+drop.addEventListener("drop", e => { e.preventDefault(); if (e.dataTransfer.files[0]) checkFile(e.dataTransfer.files[0]); });
+$("#file").onchange = e => { if (e.target.files[0]) checkFile(e.target.files[0]); e.target.value = ""; };
+
+async function checkFile(file) {
+  $("#impErr").textContent = ""; $("#pvCard").classList.add("hidden"); $("#runCard").classList.add("hidden");
+  if (file.size > 10 * 1024 * 1024) { $("#impErr").textContent = "The file is larger than 10 MB. Split it into smaller files."; return; }
+  $("#dropText").textContent = `Checking ${file.name}...`;
+  const b64 = await new Promise((ok, bad) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(",")[1]); fr.onerror = bad; fr.readAsDataURL(file); });
+  try {
+    const d = await api("/import/preview", {method:"POST", body: JSON.stringify({filename: file.name, content_b64: b64})});
+    JOB = d.job_id; showPreview(file.name, d);
+  } catch (e) { $("#impErr").textContent = e.message; }
+  finally { $("#dropText").textContent = "Drop the Excel or CSV file here, or click to choose it"; }
+}
+function showPreview(name, d) {
+  const s = d.summary, ok = s.new + s.changed + s.unchanged;
+  $("#pvTitle").textContent = `Check before importing: ${name}`;
+  $("#pvTiles").innerHTML = [[s.new,"New products"],[s.changed,"Changed"],[s.unchanged,"No change"],[s.errors,"Rows with errors (skipped)"],[s.warnings,"Warnings"],[s.missing,"Active products not in this file"]]
+    .map(([v,l]) => `<div class="tile"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+  const errs = d.issues.filter(i => i.level === "error"), warns = d.issues.filter(i => i.level === "warning");
+  const issueTable = list => `<div class="scroll"><table><thead><tr><th>Excel row</th><th>SKU</th><th>Problem</th></tr></thead><tbody>${list.map(i =>
+      `<tr><td>${i.row}</td><td>${esc(i.sku || "–")}</td><td>${esc(i.message)}</td></tr>`).join("")}</tbody></table></div>`;
+  $("#pvIssues").innerHTML = (errs.length ? `<div class="warn"><b>${errs.length} row(s) will be skipped.</b> Fix them in Excel and upload again, or import the rest now.</div>${issueTable(errs)}` : "")
+    + (warns.length ? `<details><summary>${warns.length} warning(s): these rows will be imported</summary>${issueTable(warns)}</details>` : "")
+    + (d.optional_missing.includes("cost") ? `<p class="note">No Cost column: margin is unknown for new products, so they are ranked as average margin.</p>` : "");
+  const list = (title, rows, f) => rows.length ? `<details><summary>${title} (${rows.length})</summary><div class="scroll"><table><tbody>${rows.map(f).join("")}</tbody></table></div></details>` : "";
+  $("#pvLists").innerHTML = list("New products", d.diff.new, r => `<tr><td>${esc(r.sku)}</td><td>${esc(r.name)}</td><td class="num">${money(r.price)}</td></tr>`)
+    + list("Changed products", d.diff.changed, r => `<tr><td>${esc(r.sku)}</td><td>${esc(r.name)}</td><td class="note">${esc(r.changes.join(", "))}</td></tr>`)
+    + list("Active products not in this file", d.diff.missing, r => `<tr><td>${esc(r.sku)}</td><td>${esc(r.name)}</td></tr>`);
+  $("#optDeact").checked = false; $("#optReread").checked = false;
+  $("#optDeactText").textContent = s.missing ? `Mark the ${s.missing} active product(s) that are not in this file as inactive (use this when the file is your full catalog)` : "Mark products that are not in this file as inactive";
+  $("#optDeact").disabled = !s.missing;
+  $("#runImport").textContent = `Import ${ok} product${ok === 1 ? "" : "s"}`; $("#runImport").disabled = !ok;
+  $("#pvCard").classList.remove("hidden");
+}
+$("#cancelImport").onclick = () => { $("#pvCard").classList.add("hidden"); JOB = null; };
+$("#runImport").onclick = async () => {
+  try {
+    await api(`/import/${JOB}/run`, {method:"POST", body: JSON.stringify({deactivate_missing: $("#optDeact").checked, reanalyze_all: $("#optReread").checked})});
+    $("#pvCard").classList.add("hidden"); $("#runCard").classList.remove("hidden"); pollJob(JOB);
+  } catch (e) { $("#impErr").textContent = e.message; }
+};
+async function pollJob(id) {
+  clearTimeout(POLL);
+  const j = await api(`/import/${id}`), c = (j.summary || {}).counts || {}, stage = (j.summary || {}).stage;
+  const pctDone = j.total ? Math.round(100 * j.done / j.total) : 0;
+  $("#bar").style.width = (j.status === "done" ? 100 : stage === "embedding" ? 98 : pctDone * 0.95) + "%";
+  $("#runTitle").textContent = j.status === "running" ? "Importing..." : j.status === "done" ? "Import finished" : "Import stopped";
+  $("#runText").textContent = j.status === "running"
+    ? (stage === "embedding" ? "Making products searchable..." : `AI is reading descriptions: ${j.done} of ${j.total} rows. Local models take a few seconds per product; you can leave this page open.`)
+    : `${c.created || 0} new, ${c.updated || 0} updated, ${c.unchanged || 0} unchanged, ${c.analyzed || 0} descriptions read, ${c.needs_review || 0} to check${c.deactivated ? `, ${c.deactivated} marked inactive` : ""}${c.failed ? `, ${c.failed} failed` : ""}.`
+      + ((j.results || []).some(r => r.by === "rules") ? " Some descriptions were read by rules only (AI switched off or unavailable), so key benefits are simpler." : "");
+  $("#runErr").textContent = j.error || "";
+  const rows = (j.results || []).filter(r => r.analyzed || r.action === "failed");
+  $("#runTable").innerHTML = rows.length ? `<thead><tr><th>Row</th><th>Product</th><th></th><th>What was read</th><th>Safety flags</th><th></th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${r.row}</td><td><a href="#" data-detail="${esc(r.sku)}">${esc(r.name)}</a><div class="note">${esc(r.sku)}</div></td>
+      <td>${r.action === "failed" ? '<span class="tag err">failed</span>' : `<span class="tag">${ACTION[r.action]}</span>`}</td>
+      <td class="note">${r.action === "failed" ? esc(r.error) : esc([r.category, (r.skin || []).join(", "), (r.concerns || []).join(", "), ages(r.min_age, r.max_age), (r.avoid || []).length ? "avoid: " + r.avoid.join(", ") : ""].filter(Boolean).join(" · "))}${r.by === "rules" ? ' <span class="tag">rules</span>' : ""}</td>
+      <td class="note">${esc((r.flags || []).join(", ") || "–")}</td>
+      <td>${r.needs_review ? `<span class="tag bad" title="${esc(r.review_note)}">check</span><div class="note">${esc(r.review_note)}</div>` : ""}</td></tr>`).join("") + "</tbody>" : "";
+  if (j.status === "running") POLL = setTimeout(() => pollJob(id), 1500); else loadImport();
+}
+$("#runTable").addEventListener("click", e => { const a = e.target.closest("[data-detail]"); if (!a) return; e.preventDefault(); openDetail(a.dataset.detail); });
 
 boot();
 </script>

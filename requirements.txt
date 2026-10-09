@@ -7,3 +7,4 @@ numpy>=1.26
 httpx>=0.27
 boto3>=1.34
 pytest>=8.0
+openpyxl>=3.1

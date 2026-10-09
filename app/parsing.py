@@ -83,6 +83,21 @@ def parse_budget(text: str) -> tuple[float | None, float | None]:
     return None, None
 
 
+def parse_age(text: str) -> int | None:
+    """'35 years old' -> 35, 'in her 40s' -> 45, 'aged 28' -> 28, 'teenager' -> 16."""
+    t = text.lower()
+    m = re.search(r"\b(\d{2})\s*(?:years?\s*old|y/?o|yrs?\b)|\bage[d]?\s*(\d{2})\b", t)
+    if m:
+        return int(m.group(1) or m.group(2))
+    m = re.search(r"\b(?:early|mid|late)?\s*-?\s*(\d)0s\b", t)
+    if m and 1 <= int(m.group(1)) <= 8:
+        base = int(m.group(1)) * 10
+        return base + (2 if "early" in m.group(0) else 8 if "late" in m.group(0) else 5)
+    if re.search(r"\bteen(ager)?s?\b", t):
+        return 16
+    return None
+
+
 def _skin_type(t: str) -> str | None:
     if _has(t, SKIN_KW["combination"]):
         return "combination"
@@ -107,6 +122,7 @@ def keyword_parse(text: str) -> CustomerProfile:
         budget_min=lo or 0,
         budget_max=hi,
         categories=_categories(t),
+        age=parse_age(text),
         note=text,
     )
 
@@ -120,6 +136,7 @@ Return ONLY a JSON object with these keys:
   "budget_min": number or null
   "budget_max": number or null (max price per product)
   "categories": list from {CATEGORIES}, empty if the customer wants a full routine
+  "age": integer or null (customer's age if stated; "in her 30s" -> 35)
 Use only the listed values. Do not guess things the note does not say."""
 
 
@@ -153,6 +170,7 @@ def parse_text(provider: Provider, text: str, use_llm: bool = True) -> CustomerP
         "categories": base.categories or llm.categories,
         "budget_min": base.budget_min or _num_or_none(data.get("budget_min")) or 0,
         "budget_max": base.budget_max or _num_or_none(data.get("budget_max")),
+        "age": base.age or _age_or_none(data.get("age")),
     })
 
 
@@ -166,8 +184,17 @@ def merge_profiles(form: CustomerProfile, parsed: CustomerProfile) -> CustomerPr
         "categories": form.categories or parsed.categories,
         "budget_min": form.budget_min or parsed.budget_min,
         "budget_max": form.budget_max or parsed.budget_max,
+        "age": form.age or parsed.age,
         "note": " ".join(x for x in [form.note, parsed.note] if x),
     })
+
+
+def _age_or_none(v) -> int | None:
+    try:
+        v = int(v)
+        return v if 10 <= v <= 100 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _num_or_none(v) -> float | None:

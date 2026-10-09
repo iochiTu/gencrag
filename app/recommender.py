@@ -10,7 +10,7 @@ from .db import fetch_candidates, log_recommendation
 from .models import CONCERN_LABEL, CustomerProfile, RecommendRequest
 from .parsing import merge_profiles, parse_text
 from .providers import Provider, extract_json
-from .scoring import pick_diverse, score_candidates
+from .scoring import build_steps, score_candidates
 from .strategy import RankingSettings, load_ranking
 
 NO_LIMIT = 1e12
@@ -42,27 +42,43 @@ def build_query_text(profile: CustomerProfile, helpful: list[str]) -> str:
 
 RANK_SYSTEM = """You are a skincare advisor helping a store employee of a K-beauty brand.
 You get a customer profile and a numbered shortlist of products that ALREADY passed all safety,
-stock and budget checks. Choose the best {n} products for this customer.
+stock and budget checks. Build a routine of up to {steps} steps for this customer.
 
 Rules:
-- Choose ONLY SKUs from the shortlist. Never invent products, prices or ingredients.
-- Prefer a routine: different categories (cleanser, toner, serum, cream, sunscreen) unless the
-  customer asked for one category.
+- One category per step (cleanser, toner, essence, serum, cream, sunscreen, mask). If the customer
+  asked for one category, make a single step for it.
+- For EACH step give up to {options} options from that category, best first, so the employee can offer
+  the customer a choice. Only add an option if it really suits this customer.
+- Choose ONLY SKUs from the shortlist. Never invent products, prices, ingredients or claims.
+- Base your choice on each product's description, benefits, skin types, ages and ingredients.
 - Customer fit comes first. When two products fit about equally, prefer the higher business_score.
-- Reasons: one short sentence each, in English, about how the product helps THIS customer,
-  mentioning a key ingredient. No medical claims (say "helps with", never "treats" or "cures").
-- Return ONLY JSON: {{"picks": [{{"sku": "...", "reason": "..."}}], "routine_tip": "..."}}"""
+- Reason: one short sentence per option, in English, saying why it suits THIS customer and how it
+  differs from the other options (e.g. lighter texture, lower price, stronger active).
+  No medical claims (say "helps with", never "treats" or "cures").
+- Return ONLY JSON:
+  {{"steps": [{{"category": "serum", "options": [{{"sku": "...", "reason": "..."}}]}}], "routine_tip": "..."}}"""
+
+
+def _about(c: dict) -> str:
+    d = c.get("description") or ""
+    m = re.search(r"(?:full\s+)?(?:ingredients?|inci)(?:\s+list)?\s*[:：\-]", d, re.I)
+    return re.sub(r"\s+", " ", d[: m.start()] if m else d).strip()[:320]
+
+
+def _ages(c: dict) -> str | None:
+    lo, hi = c.get("min_age"), c.get("max_age")
+    return f"{lo}-{hi}" if lo and hi else (f"{lo}+" if lo else (f"up to {hi}" if hi else None))
 
 
 def _shortlist_for_llm(shortlist: list[dict]) -> str:
     lines = []
     for i, c in enumerate(shortlist, 1):
-        lines.append(json.dumps({
-            "n": i, "sku": c["sku"], "name": c["name"],
-            "category": c["category"], "price": c["price"],
-            "targets": c.get("target_concerns"), "key_ingredients": (c.get("key_ingredients") or [])[:4],
-            "about": (c.get("description") or "")[:220], "business_score": c["business_score"],
-        }))
+        lines.append(json.dumps({k: v for k, v in {
+            "n": i, "sku": c["sku"], "name": c["name"], "category": c["category"], "price": c["price"],
+            "skin_types": c.get("suitable_skin_types"), "targets": c.get("target_concerns"), "ages": _ages(c),
+            "benefits": (c.get("key_benefits") or [])[:3], "key_ingredients": (c.get("key_ingredients") or [])[:5],
+            "about": _about(c), "business_score": c["business_score"],
+        }.items() if v not in (None, [], "")}))
     return "\n".join(lines)
 
 
@@ -78,16 +94,27 @@ def sanitize(text: str) -> str:
 
 def template_reason(c: dict, profile: CustomerProfile) -> str:
     hits = [x for x in profile.concerns if x in (c.get("target_concerns") or [])]
+    focus = " and ".join(CONCERN_LABEL[x] for x in hits)
+    benefit = (c.get("key_benefits") or [None])[0]
+    if benefit:
+        return sanitize(f"For {focus}: {benefit}" if focus else benefit)
     ing = " and ".join((c.get("key_ingredients") or [])[:2])
-    focus = " and ".join(CONCERN_LABEL[x] for x in hits) or "daily care"
+    focus = focus or "daily care"
     return f"{c['category'].title()} for {focus}, with {ing}." if ing else f"{c['category'].title()} for {focus}."
 
 
-def llm_rerank(provider: Provider, profile: CustomerProfile, shortlist: list[dict], n: int, use_llm: bool = True):
-    """Returns (picks with reasons, routine_tip, used_llm). Falls back to deterministic picks on any problem."""
-    by_sku = {c["sku"]: c for c in shortlist}
+def _with_reason(c: dict, reason: str | None, profile: CustomerProfile) -> dict:
+    return {**c, "reason": sanitize(reason or "") or template_reason(c, profile)}
+
+
+def llm_rerank(provider: Provider, profile: CustomerProfile, shortlist: list[dict], steps: int, options: int = 3,
+               use_llm: bool = True):
+    """Returns (steps, routine_tip, used_llm). Each step = {category, routine_step, options:[product + reason]}.
+    Anything the model returns that is not on the shortlist is dropped; gaps are filled deterministically."""
+    base = build_steps(shortlist, steps, options)
     if use_llm:
-        system = RANK_SYSTEM.format(n=n)
+        by_sku = {c["sku"]: c for c in shortlist}
+        system = RANK_SYSTEM.format(steps=steps, options=options)
         user = ("Customer profile:\n" + profile.model_dump_json(exclude={"note"}) +
                 (f"\nEmployee note: {profile.note}" if profile.note else "") +
                 "\n\nShortlist (one JSON per line):\n" + _shortlist_for_llm(shortlist))
@@ -95,21 +122,45 @@ def llm_rerank(provider: Provider, profile: CustomerProfile, shortlist: list[dic
             data = extract_json(provider.chat(system, user, role="rank")) or {}
         except Exception:
             data = {}
-        picks, seen = [], set()
-        for p in data.get("picks") or []:
-            sku = str(p.get("sku", "")).strip() if isinstance(p, dict) else ""
-            if sku in by_sku and sku not in seen:       # drop anything not on the shortlist
-                seen.add(sku)
-                picks.append({**by_sku[sku], "reason": sanitize(str(p.get("reason") or "")) or template_reason(by_sku[sku], profile)})
-            if len(picks) == n:
-                break
-        if len(picks) >= min(n, len(shortlist), 2):
-            if len(picks) < min(n, len(shortlist)):     # top up from the deterministic order
-                for c in pick_diverse([c for c in shortlist if c["sku"] not in seen], n - len(picks)):
-                    picks.append({**c, "reason": template_reason(c, profile)})
-            return picks, sanitize(str(data.get("routine_tip") or "")), True
-    picks = [{**c, "reason": template_reason(c, profile)} for c in pick_diverse(shortlist, n)]
-    return picks, "", False
+        raw_steps = data.get("steps")
+        if not isinstance(raw_steps, list) and isinstance(data.get("picks"), list):
+            raw_steps = [{"options": [p]} for p in data["picks"]]          # tolerate the older flat format
+        out, used = [], set()
+        for st in raw_steps or []:
+            opts = st.get("options") if isinstance(st, dict) else None
+            for o in opts or []:
+                sku = str(o.get("sku", "")).strip() if isinstance(o, dict) else ""
+                c = by_sku.get(sku)
+                if not c or sku in used:
+                    continue                                                # unknown or repeated SKU
+                step = next((s for s in out if s["category"] == c["category"]), None)
+                if step is None:
+                    if len(out) >= steps:
+                        continue
+                    step = {"category": c["category"], "routine_step": c["routine_step"], "options": []}
+                    out.append(step)
+                if len(step["options"]) < options:
+                    step["options"].append(_with_reason(c, o.get("reason"), profile))
+                    used.add(sku)
+        if out:
+            for b in base:                                                  # top up from the deterministic plan
+                step = next((s for s in out if s["category"] == b["category"]), None)
+                if step is None and len(out) < steps:
+                    step = {"category": b["category"], "routine_step": b["routine_step"], "options": []}
+                    out.append(step)
+                if step is None:
+                    continue
+                for c in b["options"]:
+                    if len(step["options"]) >= options:
+                        break
+                    if c["sku"] not in used:
+                        step["options"].append(_with_reason(c, None, profile))
+                        used.add(c["sku"])
+            out.sort(key=lambda s: s["routine_step"])
+            return out, sanitize(str(data.get("routine_tip") or "")), True
+    for b in base:
+        b["options"] = [_with_reason(c, None, profile) for c in b["options"]]
+    return base, "", False
 
 
 def build_profile(provider: Provider, req: RecommendRequest, use_llm: bool) -> CustomerProfile:
@@ -155,28 +206,35 @@ def recommend(conn, provider: Provider, req: RecommendRequest) -> dict:
         return {"status": "no_match", "profile": profile.model_dump(),
                 "message": "No in-stock product matches these conditions. Try a wider budget or category."}
 
-    picks, tip, used_llm = llm_rerank(provider, profile, shortlist, req.top_n, use_llm=ranking.use_llm_rerank)
-    picks.sort(key=lambda c: c["routine_step"])
+    n_options = req.options or ranking.options_per_step
+    steps, tip, used_llm = llm_rerank(provider, profile, shortlist, req.top_n, n_options, use_llm=ranking.use_llm_rerank)
 
-    public = [{
-        "sku": c["sku"], "name": c["name"], "brand": c.get("brand"), "category": c["category"],
-        "routine_step": c["routine_step"], "price": c["price"], "stock_qty": c["stock_qty"],
-        "key_ingredients": (c.get("key_ingredients") or [])[:4],
-        "reason": c["reason"],
-        **({"debug": {k: c[k] for k in ("score", "skin_fit", "similarity", "margin_norm", "priority_norm",
-                                         "campaign_boost", "margin_pct")}} if req.debug else {}),
-    } for c in picks]
+    def public(c: dict, rank_in_step: int) -> dict:
+        return {
+            "sku": c["sku"], "name": c["name"], "brand": c.get("brand"), "category": c["category"],
+            "routine_step": c["routine_step"], "price": c["price"], "stock_qty": c["stock_qty"],
+            "key_ingredients": (c.get("key_ingredients") or [])[:5],
+            "key_benefits": [b for b in (c.get("key_benefits") or []) if b not in c["reason"]][:3],
+            "ages": _ages(c), "option": rank_in_step, "reason": c["reason"],
+            **({"debug": {k: c[k] for k in ("score", "skin_fit", "similarity", "margin_norm", "priority_norm",
+                                             "campaign_boost", "margin_pct")}} if req.debug else {}),
+        }
 
+    out_steps = [{"category": s["category"], "routine_step": s["routine_step"],
+                  "options": [public(c, i + 1) for i, c in enumerate(s["options"])]} for s in steps]
     log_id = log_recommendation(
         conn, employee_id=req.employee_id, request=req.model_dump(exclude={"profile"}),
         profile=profile.model_dump(),
         candidates=[{"sku": c["sku"], "score": c["score"]} for c in shortlist],
-        picks=[{"sku": c["sku"], "reason": c["reason"]} for c in picks],
+        picks=[{"sku": o["sku"], "reason": o["reason"], "step": s["category"], "option": o["option"]}
+               for s in out_steps for o in s["options"]],
         model=provider.model_label("rank") if used_llm else "fallback", used_llm=used_llm,
     )
     return {
-        "status": "ok", "log_id": log_id, "profile": profile.model_dump(), "recommendations": public,
-        "routine_tip": tip, "total": round(sum(c["price"] for c in picks), 2), "currency": settings.currency,
+        "status": "ok", "log_id": log_id, "profile": profile.model_dump(), "steps": out_steps,
+        "recommendations": [s["options"][0] for s in out_steps],          # first choice of each step
+        "routine_tip": tip, "total": round(sum(s["options"][0]["price"] for s in out_steps), 2),
+        "currency": settings.currency, "options_per_step": n_options,
         "used_llm": used_llm, "model": provider.model_label("rank") if used_llm else "rule-based fallback",
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
     }
@@ -189,11 +247,12 @@ def preview(conn, provider: Provider, req: RecommendRequest, current: RankingSet
 
     def view(r: RankingSettings) -> dict:
         scored = rank(cands, profile, r)
-        picks = {c["sku"] for c in pick_diverse(scored[: settings.shortlist_size], req.top_n)}
+        plan = build_steps(scored[: settings.shortlist_size], req.top_n, req.options or r.options_per_step)
+        picks = {c["sku"]: ("first" if i == 0 else "alt") for s in plan for i, c in enumerate(s["options"])}
         return {"weights": r.describe(), "rows": [{
             "rank": i + 1, "sku": c["sku"], "name": c["name"], "category": c["category"], "price": c["price"],
-            "score": c["score"], "skin_fit": c["skin_fit"], "margin_pct": round(c["margin_pct"] or 0, 3),
-            "priority": c["priority"], "campaign_boost": c["campaign_boost"], "picked": c["sku"] in picks,
+            "score": c["score"], "skin_fit": c["skin_fit"], "margin_pct": None if c["margin_pct"] is None else round(c["margin_pct"], 3),
+            "priority": c["priority"], "campaign_boost": c["campaign_boost"], "picked": picks.get(c["sku"]),
         } for i, c in enumerate(scored[: settings.shortlist_size])]}
 
     return {"profile": profile.model_dump(), "current": view(current), "proposed": view(proposed),

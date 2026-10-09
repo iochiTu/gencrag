@@ -8,12 +8,11 @@ CREATE TABLE IF NOT EXISTS products (
     sku           TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
     brand         TEXT,
-    category      TEXT NOT NULL CHECK (category IN
-                  ('cleanser','toner','essence','serum','cream','sunscreen','mask')),
-    routine_step  SMALLINT NOT NULL,           -- 1 cleanser .. 6 sunscreen, 7 mask
+    category      TEXT NOT NULL,              -- see products_category_check below
+    routine_step  SMALLINT NOT NULL,           -- 1 cleanser .. 6 sunscreen, 7 mask, 8 other
     price         NUMERIC(12,2) NOT NULL CHECK (price >= 0),   -- in CURRENCY from .env
-    cost          NUMERIC(12,2) NOT NULL CHECK (cost >= 0),
-    stock_qty     INTEGER NOT NULL DEFAULT 0,
+    cost          NUMERIC(12,2) CHECK (cost >= 0),             -- optional; NULL = margin unknown
+    stock_qty     INTEGER,                                     -- optional; NULL = not tracked (treated as in stock)
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     description   TEXT NOT NULL,
     embedding     vector({{EMBED_DIM}}),
@@ -26,7 +25,7 @@ CREATE INDEX IF NOT EXISTS products_embedding_hnsw
 -- Skin suitability, maintained by R&D
 -- skin types: dry, oily, combination, normal, sensitive
 -- concerns:   acne, dryness, redness, pigmentation, wrinkles, pores, dullness, oiliness
--- avoid_for:  pregnancy, rosacea, ...
+-- avoid_for:  pregnancy (plus ingredient flags below)
 CREATE TABLE IF NOT EXISTS product_attributes (
     sku                 TEXT PRIMARY KEY REFERENCES products(sku) ON DELETE CASCADE,
     suitable_skin_types TEXT[] NOT NULL DEFAULT '{}',
@@ -108,4 +107,40 @@ CREATE TABLE IF NOT EXISTS recommendation_log (
     used_llm      BOOLEAN,
     feedback      TEXT CHECK (feedback IN ('accepted','swapped','sold','rejected')),
     feedback_note TEXT
+);
+
+-- ---------------------------------------------------------------------------------------------
+-- v0.3: Excel import, AI-extracted attributes, multiple options (safe to re-run)
+ALTER TABLE products DROP CONSTRAINT IF EXISTS products_category_check;
+ALTER TABLE products ADD CONSTRAINT products_category_check CHECK (category IN
+    ('cleanser','toner','essence','serum','cream','sunscreen','mask','other'));
+ALTER TABLE products ALTER COLUMN cost DROP NOT NULL;
+ALTER TABLE products ALTER COLUMN stock_qty DROP NOT NULL;
+ALTER TABLE products ALTER COLUMN stock_qty DROP DEFAULT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS description_hash TEXT;     -- re-analyse only when it changes
+
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS min_age SMALLINT;
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS max_age SMALLINT;
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS key_benefits TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS review_note TEXT;
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS extracted_by TEXT;   -- 'ai+rules', 'rules', 'manual'
+
+ALTER TABLE recommendation_log ADD COLUMN IF NOT EXISTS feedback_sku TEXT;  -- which option was sold
+
+-- Excel uploads from the admin portal
+CREATE TABLE IF NOT EXISTS import_jobs (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by  TEXT NOT NULL,
+    filename    TEXT,
+    status      TEXT NOT NULL DEFAULT 'preview',   -- preview | running | done | failed | cancelled
+    rows        JSONB NOT NULL,                     -- parsed rows from the file
+    summary     JSONB,                              -- counts: new / changed / unchanged / missing
+    options     JSONB,
+    total       INTEGER NOT NULL DEFAULT 0,
+    done        INTEGER NOT NULL DEFAULT 0,
+    results     JSONB NOT NULL DEFAULT '[]',        -- per-row outcome
+    error       TEXT,
+    finished_at TIMESTAMPTZ
 );

@@ -13,7 +13,7 @@ from .models import FeedbackRequest, RecommendRequest
 from .providers import ProviderError, embed_model_label, get_provider
 from .recommender import recommend
 
-app = FastAPI(title="K-Beauty Product Recommender", version="0.2.0")
+app = FastAPI(title="K-Beauty Product Recommender", version="0.3.0")
 provider = get_provider()
 STATIC = Path(__file__).parent / "static"
 admin.set_provider(provider)
@@ -52,6 +52,6 @@ def post_recommend(req: RecommendRequest):
 @app.post("/feedback")
 def post_feedback(fb: FeedbackRequest):
     with connect() as conn:
-        if not save_feedback(conn, fb.log_id, fb.feedback, fb.note):
+        if not save_feedback(conn, fb.log_id, fb.feedback, fb.note, fb.sku):
             raise HTTPException(404, "log_id not found")
     return {"ok": True}

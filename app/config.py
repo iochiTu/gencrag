@@ -55,7 +55,7 @@ class Settings:
 
     # --- Retrieval (ranking weights are set in the admin portal) ---
     retrieve_k: int = int(_env("RETRIEVE_K", "30"))
-    shortlist_size: int = int(_env("SHORTLIST_SIZE", "10"))
+    shortlist_size: int = int(_env("SHORTLIST_SIZE", "20"))   # candidates the AI chooses options from
 
     # --- Admin portal (/admin) ---
     admin_password: str = _env("ADMIN_PASSWORD", "")          # empty = portal disabled
