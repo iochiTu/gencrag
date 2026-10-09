@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recommender Admin</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg:#f6f6f4; --card:#ffffff; --ink:#0b0b0b; --quiet:#52514e; --faint:#8a8984; --line:#e3e2dd; --hover:#f1f0ec;
+    --accent:#c2416b; --accent-bg:#fdf2f6; --on-accent:#ffffff; --good:#008300; --bad:#c43c3b; --warn-bg:#fff6e0;
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --bg:#121211; --card:#1a1a19; --ink:#ffffff; --quiet:#c3c2b7; --faint:#8f8e86; --line:#33332f; --hover:#24241f;
+      --accent:#e86d96; --accent-bg:#3a1f29; --on-accent:#1a0d12; --good:#3fb43f; --bad:#e66767; --warn-bg:#3a3020;
+      --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); font-size:14px; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 24px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; }
+  nav { display:flex; gap:4px; }
+  nav button { border:0; background:none; padding:8px 12px; border-radius:8px; font:inherit; color:var(--quiet); cursor:pointer; }
+  nav button.on { background:var(--accent-bg); color:var(--accent); font-weight:600; }
+  .who { margin-left:auto; color:var(--quiet); font-size:13px; }
+  .who button { margin-left:8px; }
+  main { max-width:1180px; margin:0 auto; padding:24px 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+  h2 { font-size:16px; margin:0 0 4px; } .sub { color:var(--quiet); margin:0 0 16px; font-size:13px; }
+  h3 { font-size:14px; margin:20px 0 8px; }
+  button.btn { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:7px 14px; border-radius:8px; font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  input, select, textarea { font:inherit; color:var(--ink); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  textarea { width:100%; min-height:56px; }
+  .presets { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
+  .preset { text-align:left; border:1px solid var(--line); border-radius:10px; padding:12px; background:var(--card); cursor:pointer; color:var(--ink); font:inherit; }
+  .preset b { display:block; margin-bottom:4px; } .preset span { color:var(--quiet); font-size:12.5px; }
+  .preset.on { border-color:var(--accent); background:var(--accent-bg); }
+  .slider { margin:20px 0 8px; }
+  .slider .ends { display:flex; justify-content:space-between; font-size:13px; color:var(--quiet); margin-bottom:6px; }
+  .slider .ends b { color:var(--ink); }
+  input[type=range] { width:100%; accent-color:var(--accent); padding:0; border:0; }
+  .wbar { display:flex; gap:2px; height:14px; margin:16px 0 8px; }
+  .wbar div { border-radius:4px; transition:width .15s; }
+  .legend { display:flex; flex-wrap:wrap; gap:16px; font-size:13px; color:var(--quiet); }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px; }
+  .legend b { color:var(--ink); }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:900px) { .grid2 { grid-template-columns:1fr; } }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--quiet); font-weight:600; padding:8px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:7px 6px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  tr:hover td { background:var(--hover); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11.5px; background:var(--hover); color:var(--quiet); }
+  .tag.on { background:var(--accent-bg); color:var(--accent); }
+  .up { color:var(--good); } .down { color:var(--bad); }
+  .note { font-size:12.5px; color:var(--quiet); }
+  .warn { background:var(--warn-bg); border-radius:8px; padding:8px 12px; font-size:13px; margin-top:12px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+  .tile { border:1px solid var(--line); border-radius:10px; padding:14px; background:var(--card); }
+  .tile .v { font-size:24px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .tile .l { color:var(--quiet); font-size:12.5px; margin-top:2px; }
+  .scroll { overflow-x:auto; }
+  #login { max-width:360px; margin:80px auto; }
+  #login label { display:block; margin:12px 0 4px; font-weight:600; font-size:13px; }
+  #login input { width:100%; }
+  .err { color:var(--bad); font-size:13px; margin-top:8px; min-height:18px; }
+  .hidden { display:none !important; }
+  tr.dirty td { background:var(--warn-bg); }
+  td input[type=date] { width:130px; } td select { min-width:70px; }
+</style>
+</head>
+<body>
+
+<section id="login" class="card hidden">
+  <h2>Recommender admin</h2>
+  <p class="sub">Sign in to change ranking, priorities and campaigns.</p>
+  <form id="loginForm">
+    <label for="ln">Your name (for the change log)</label><input id="ln" required maxlength="40" autocomplete="name">
+    <label for="lp">Admin password</label><input id="lp" type="password" required autocomplete="current-password">
+    <div class="err" id="loginErr"></div>
+    <button class="btn primary" style="width:100%;margin-top:8px">Sign in</button>
+  </form>
+</section>
+
+<div id="app" class="hidden">
+<header>
+  <h1>Recommender admin</h1>
+  <nav>
+    <button data-tab="ranking" class="on">Ranking strategy</button>
+    <button data-tab="products">Priorities &amp; campaigns</button>
+    <button data-tab="activity">Activity &amp; feedback</button>
+  </nav>
+  <div class="who"><span id="who"></span><button class="btn" id="logout">Sign out</button></div>
+</header>
+
+<main>
+<!-- ============ Ranking strategy ============ -->
+<section data-panel="ranking">
+  <div class="card">
+    <h2>What should the recommender favour?</h2>
+    <p class="sub">Safety, stock and budget rules always apply first. These settings only decide the order among products that already suit the customer.</p>
+    <div class="presets" id="presets"></div>
+
+    <div class="slider">
+      <div class="ends"><span>Customer fit <b id="fitPct"></b></span><span><b id="bizPct"></b> Business value</span></div>
+      <input type="range" id="biz" min="0" max="70" step="1">
+      <div class="note">Business value can be at most 70%, so customer fit always counts.</div>
+    </div>
+    <div class="slider">
+      <div class="ends"><span>Profit margin <b id="marPct"></b></span><span><b id="priPct"></b> Product priority</span></div>
+      <input type="range" id="pri" min="0" max="100" step="1">
+      <div class="note">Within business value: higher-margin products vs. products you set as priority (new launches, focus SKUs).</div>
+    </div>
+
+    <h3>Resulting score weights</h3>
+    <div class="wbar" id="wbar"></div>
+    <div class="legend" id="wlegend"></div>
+
+    <h3>Guards</h3>
+    <div class="row">
+      <label>Minimum skin match
+        <select id="minfit">
+          <option value="0">Off</option>
+          <option value="0.25">At least 25% of concerns</option>
+          <option value="0.5">At least half of concerns</option>
+          <option value="1">All concerns</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="llm"> Use the AI model to pick and explain (off = rule-based only)</label>
+    </div>
+    <div class="warn hidden" id="profitWarn">Business value is above 50%. Products that match few of the customer's concerns can now be shown. Consider a minimum skin match, and watch the "Not suitable" rate in Activity: staff stop trusting the tool if picks feel pushy.</div>
+
+    <div class="row" style="margin-top:20px">
+      <button class="btn primary" id="saveRanking" disabled>Save strategy</button>
+      <button class="btn" id="resetRanking" disabled>Discard changes</button>
+      <span class="note" id="rankingMeta"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Preview on a test customer</h2>
+    <p class="sub">Compare the saved strategy with your unsaved changes. Uses rules only (no AI), nothing is logged.</p>
+    <div class="row">
+      <select id="pvSkin"><option value="">Skin type: any</option><option>dry</option><option>oily</option><option>combination</option><option>normal</option></select>
+      <label><input type="checkbox" id="pvSens"> Sensitive</label>
+      <label>Max price <input type="number" id="pvMax" min="0" style="width:90px"></label>
+    </div>
+    <textarea id="pvText" style="margin-top:10px">Combination skin with breakouts and enlarged pores, wants a full routine</textarea>
+    <div class="row" style="margin-top:10px"><button class="btn" id="runPreview">Preview</button><span class="err" id="pvErr"></span></div>
+    <div class="grid2 hidden" id="pvOut" style="margin-top:16px">
+      <div><h3>Saved strategy</h3><div class="scroll"><table id="pvCur"></table></div></div>
+      <div><h3>With your changes</h3><div class="scroll"><table id="pvNew"></table></div></div>
+    </div>
+    <p class="note hidden" id="pvLegend">Score combines fit, similarity, margin and priority. Rows marked "shown" are the products staff would see (one per category first).</p>
+  </div>
+</section>
+
+<!-- ============ Products ============ -->
+<section data-panel="products" class="hidden">
+  <div class="card">
+    <h2>Priorities &amp; campaigns</h2>
+    <p class="sub">Priority 1 to 5 (3 = normal). A campaign boost adds to the score between its dates. Hidden products are never recommended.</p>
+    <div class="row" style="margin-bottom:12px">
+      <input id="pSearch" placeholder="Search name or SKU" style="width:240px">
+      <span class="note" id="pCount"></span>
+    </div>
+    <div class="scroll"><table id="pTable"></table></div>
+  </div>
+</section>
+
+<!-- ============ Activity ============ -->
+<section data-panel="activity" class="hidden">
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><h2>Activity &amp; feedback</h2><p class="sub" style="margin:0">How staff use the recommender and how customers respond.</p></div>
+      <select id="days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
+    </div>
+    <div class="tiles" id="tiles" style="margin-top:16px"></div>
+  </div>
+  <div class="card"><h2>Most recommended products</h2><div class="scroll"><table id="topT"></table></div></div>
+  <div class="card"><h2>Recent recommendations</h2><div class="scroll"><table id="recentT"></table></div></div>
+  <div class="card"><h2>Settings change log</h2><div class="scroll"><table id="changesT"></table></div></div>
+</section>
+</main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = (v, d = 0) => v == null ? "–" : (v * 100).toFixed(d) + "%";
+let CURRENCY = "USD";
+const money = n => { try { return new Intl.NumberFormat("en-US",{style:"currency",currency:CURRENCY}).format(n); } catch { return n; } };
+const when = iso => iso ? new Date(iso).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}) : "";
+
+async function api(path, opts = {}) {
+  const r = await fetch("/admin/api" + path, {headers:{"Content-Type":"application/json"}, ...opts});
+  const d = await r.json().catch(() => ({}));
+  if (r.status === 401 && path !== "/login") { showLogin(); throw new Error("Please sign in."); }
+  if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : (d.detail?.[0]?.msg || r.statusText));
+  return d;
+}
+function showLogin(msg) { $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); if (msg) $("#loginErr").textContent = msg; }
+async function boot() {
+  try { const me = await api("/me"); CURRENCY = me.currency; $("#who").textContent = "Signed in as " + me.name;
+        $("#login").classList.add("hidden"); $("#app").classList.remove("hidden"); loadRanking(); }
+  catch (e) { showLogin(e.message === "Please sign in." ? "" : e.message); }
+}
+$("#loginForm").onsubmit = async e => {
+  e.preventDefault(); $("#loginErr").textContent = "";
+  try { await api("/login", {method:"POST", body: JSON.stringify({name: $("#ln").value, password: $("#lp").value})}); $("#lp").value = ""; boot(); }
+  catch (err) { $("#loginErr").textContent = err.message; }
+};
+$("#logout").onclick = async () => { await api("/logout", {method:"POST"}); showLogin(); };
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll("[data-panel]").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== b.dataset.tab));
+  ({ranking: loadRanking, products: loadProducts, activity: loadActivity})[b.dataset.tab]();
+});
+
+/* ---------------- Ranking strategy ---------------- */
+let PRESETS = {}, saved = null, draft = null;
+const W = [["fit","Customer fit","--s1"],["similarity","Note match","--s2"],["margin","Profit margin","--s3"],["priority","Product priority","--s4"]];
+function weights(s) { const b = s.business_share/100, p = s.priority_share/100;
+  return {fit:(1-b)*.7, similarity:(1-b)*.3, margin:b*(1-p), priority:b*p}; }
+async function loadRanking() {
+  const d = await api("/ranking"); PRESETS = d.presets; saved = d.settings; draft = {...saved};
+  $("#rankingMeta").textContent = d.updated_by ? `Last saved by ${d.updated_by}, ${when(d.updated_at)}` : "Using the default (Balanced). Not saved yet.";
+  $("#presets").innerHTML = Object.entries(PRESETS).map(([k,p]) =>
+    `<button class="preset" data-k="${k}"><b>${esc(p.label)}</b><span>${esc(p.help)}</span></button>`).join("");
+  document.querySelectorAll(".preset").forEach(b => b.onclick = () => {
+    const p = PRESETS[b.dataset.k]; draft = {...draft, preset:b.dataset.k, business_share:p.business_share, priority_share:p.priority_share}; renderRanking(); });
+  renderRanking();
+}
+function renderRanking() {
+  const s = draft; $("#biz").value = s.business_share; $("#pri").value = s.priority_share;
+  $("#fitPct").textContent = (100 - s.business_share) + "%"; $("#bizPct").textContent = s.business_share + "%";
+  $("#marPct").textContent = (100 - s.priority_share) + "%"; $("#priPct").textContent = s.priority_share + "%";
+  $("#minfit").value = String(s.min_skin_fit); $("#llm").checked = s.use_llm_rerank;
+  document.querySelectorAll(".preset").forEach(b => b.classList.toggle("on", b.dataset.k === s.preset));
+  const w = weights(s);
+  $("#wbar").innerHTML = W.map(([k,,c]) => `<div style="width:${w[k]*100}%;background:var(${c})" title="${k}: ${pct(w[k])}"></div>`).join("");
+  $("#wlegend").innerHTML = W.map(([k,l,c]) => `<span><i style="background:var(${c})"></i>${l} <b>${pct(w[k])}</b></span>`).join("");
+  $("#profitWarn").classList.toggle("hidden", s.business_share <= 50);
+  const dirty = JSON.stringify(s) !== JSON.stringify(saved);
+  $("#saveRanking").disabled = !dirty; $("#resetRanking").disabled = !dirty;
+}
+function matchPreset() {
+  const hit = Object.entries(PRESETS).find(([,p]) => p.business_share === draft.business_share && p.priority_share === draft.priority_share);
+  draft.preset = hit ? hit[0] : "custom";
+}
+$("#biz").oninput = e => { draft.business_share = +e.target.value; matchPreset(); renderRanking(); };
+$("#pri").oninput = e => { draft.priority_share = +e.target.value; matchPreset(); renderRanking(); };
+$("#minfit").onchange = e => { draft.min_skin_fit = +e.target.value; renderRanking(); };
+$("#llm").onchange = e => { draft.use_llm_rerank = e.target.checked; renderRanking(); };
+$("#resetRanking").onclick = () => { draft = {...saved}; renderRanking(); };
+$("#saveRanking").onclick = async () => {
+  try { await api("/ranking", {method:"PUT", body: JSON.stringify(draft)}); await loadRanking(); }
+  catch (e) { alertInline(e.message); }
+};
+function alertInline(m) { $("#rankingMeta").textContent = "Error: " + m; }
+
+$("#runPreview").onclick = async () => {
+  $("#pvErr").textContent = ""; $("#runPreview").disabled = true;
+  const profile = {skin_type: $("#pvSkin").value || null, sensitive: $("#pvSens").checked,
+                   budget_max: $("#pvMax").value ? +$("#pvMax").value : null};
+  try {
+    const d = await api("/preview", {method:"POST", body: JSON.stringify({proposed: draft,
+      request: {profile, text: $("#pvText").value, top_n: 4}})});
+    const curRank = Object.fromEntries(d.current.rows.map(r => [r.sku, r.rank]));
+    const table = (v, compare) => `<thead><tr><th>#</th><th>Product</th><th class="num">Score</th><th class="num">Fit</th><th class="num">Margin</th><th class="num">Prio</th><th></th></tr></thead><tbody>` +
+      (v.rows.length ? v.rows.map(r => {
+        let move = "";
+        if (compare) { const old = curRank[r.sku]; move = old == null ? ' <span class="up">new</span>' : old > r.rank ? ` <span class="up">▲${old - r.rank}</span>` : old < r.rank ? ` <span class="down">▼${r.rank - old}</span>` : ""; }
+        return `<tr><td>${r.rank}${move}</td><td>${esc(r.name)}<div class="note">${esc(r.sku)} · ${esc(r.category)} · ${money(r.price)}</div></td>
+          <td class="num">${r.score.toFixed(3)}</td><td class="num">${pct(r.skin_fit)}</td><td class="num">${pct(r.margin_pct)}</td>
+          <td class="num">${r.priority}${r.campaign_boost ? "+" : ""}</td><td>${r.picked ? '<span class="tag on">shown</span>' : ""}</td></tr>`; }).join("")
+      : `<tr><td colspan="7" class="note">No product passes the filters for this customer.</td></tr>`) + "</tbody>";
+    $("#pvCur").innerHTML = table(d.current, false); $("#pvNew").innerHTML = table(d.proposed, true);
+    $("#pvOut").classList.remove("hidden"); $("#pvLegend").classList.remove("hidden");
+  } catch (e) { $("#pvErr").textContent = e.message; }
+  finally { $("#runPreview").disabled = false; }
+};
+
+/* ---------------- Priorities & campaigns ---------------- */
+let PRODUCTS = [];
+const BOOSTS = [[0,"None"],[0.03,"Small +0.03"],[0.06,"Medium +0.06"],[0.1,"Large +0.10"],[0.15,"Max +0.15"]];
+async function loadProducts() { const d = await api("/products"); CURRENCY = d.currency; PRODUCTS = d.products; renderProducts(); }
+function renderProducts() {
+  const q = $("#pSearch").value.trim().toLowerCase();
+  const rows = PRODUCTS.filter(p => !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+  $("#pCount").textContent = `${rows.length} of ${PRODUCTS.length} products`;
+  $("#pTable").innerHTML = `<thead><tr><th>Product</th><th class="num">Price</th><th class="num">Margin</th><th class="num">Stock</th>
+    <th>Priority</th><th>Campaign boost</th><th>From</th><th>To</th><th>Hide</th><th class="num">Shown 30d</th><th class="num">Sold 30d</th><th></th></tr></thead><tbody>` +
+    rows.map(p => {
+      const boostOpts = BOOSTS.some(([v]) => v === p.campaign_boost) ? BOOSTS : [...BOOSTS, [p.campaign_boost, "+" + p.campaign_boost]];
+      return `<tr data-sku="${esc(p.sku)}">
+      <td>${esc(p.name)}<div class="note">${esc(p.sku)} · ${esc(p.category)}${p.boost_active ? ' · <span class="tag on">campaign live</span>' : ""}${!p.is_active ? ' · <span class="tag">inactive</span>' : ""}</div></td>
+      <td class="num">${money(p.price)}</td><td class="num">${pct(p.margin_pct)}</td><td class="num">${p.stock_qty}</td>
+      <td><select data-f="priority">${[1,2,3,4,5].map(n => `<option ${n===p.priority?"selected":""} value="${n}">${n}${n===3?" (normal)":n===5?" (top)":""}</option>`).join("")}</select></td>
+      <td><select data-f="campaign_boost">${boostOpts.map(([v,l]) => `<option ${v===p.campaign_boost?"selected":""} value="${v}">${l}</option>`).join("")}</select></td>
+      <td><input type="date" data-f="valid_from" value="${p.valid_from ?? ""}"></td>
+      <td><input type="date" data-f="valid_to" value="${p.valid_to ?? ""}"></td>
+      <td><input type="checkbox" data-f="excluded" ${p.excluded ? "checked" : ""}></td>
+      <td class="num">${p.recommended_30d}</td><td class="num">${p.sold_30d}</td>
+      <td><button class="btn primary" data-save disabled>Save</button></td></tr>`; }).join("") + "</tbody>";
+}
+$("#pSearch").oninput = renderProducts;
+$("#pTable").addEventListener("input", e => { const tr = e.target.closest("tr[data-sku]"); if (!tr) return; tr.classList.add("dirty"); tr.querySelector("[data-save]").disabled = false; });
+$("#pTable").addEventListener("click", async e => {
+  const b = e.target.closest("[data-save]"); if (!b) return;
+  const tr = b.closest("tr"), f = n => tr.querySelector(`[data-f="${n}"]`);
+  const body = {priority:+f("priority").value, campaign_boost:+f("campaign_boost").value,
+                valid_from:f("valid_from").value || null, valid_to:f("valid_to").value || null, excluded:f("excluded").checked};
+  b.disabled = true; b.textContent = "Saving";
+  try { await api("/products/" + encodeURIComponent(tr.dataset.sku), {method:"PUT", body: JSON.stringify(body)});
+        await loadProducts(); }
+  catch (err) { b.disabled = false; b.textContent = "Save"; b.title = err.message; tr.querySelector(".note").insertAdjacentHTML("beforeend", ` <span class="down">${esc(err.message)}</span>`); }
+});
+
+/* ---------------- Activity ---------------- */
+$("#days").onchange = loadActivity;
+const FB = {accepted:"Good pick", swapped:"Swapped", sold:"Sold", rejected:"Not suitable"};
+async function loadActivity() {
+  const d = await api("/activity?days=" + $("#days").value), k = d.kpis;
+  const share = (n, of) => of ? pct(n / of) : "–";
+  $("#tiles").innerHTML = [
+    [k.recommendations, "Recommendations"], [k.employees, "Staff using it"],
+    [share(k.with_feedback, k.recommendations), "Got feedback"], [share(k.sold, k.with_feedback), "Sold (of feedback)"],
+    [share(k.rejected, k.with_feedback), "Not suitable (of feedback)"],
+    [pct(k.picked_margin, 1), `Avg margin of picks (catalog ${pct(k.catalog_margin, 1)})`],
+  ].map(([v,l]) => `<div class="tile"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+  $("#topT").innerHTML = `<thead><tr><th>Product</th><th class="num">Recommended</th><th class="num">Sold</th><th class="num">Not suitable</th><th class="num">Margin</th></tr></thead><tbody>` +
+    (d.top_products.length ? d.top_products.map(r => `<tr><td>${esc(r.name)}<div class="note">${esc(r.sku)} · ${esc(r.category)}</div></td>
+      <td class="num">${r.recommended}</td><td class="num">${r.sold}</td><td class="num">${r.rejected}</td><td class="num">${pct(r.margin_pct)}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="note">No recommendations in this period.</td></tr>`) + "</tbody>";
+  $("#recentT").innerHTML = `<thead><tr><th>When</th><th>Staff</th><th>Note / concerns</th><th>Products</th><th>Feedback</th><th>Engine</th></tr></thead><tbody>` +
+    (d.recent.length ? d.recent.map(r => `<tr><td>${when(r.created_at)}</td><td>${esc(r.employee_id || "–")}</td>
+      <td>${esc(r.note || (r.concerns || []).join(", ") || "–")}</td><td>${esc((r.skus || []).join(", "))}</td>
+      <td>${r.feedback ? `<span class="tag ${r.feedback === "sold" ? "on" : ""}">${FB[r.feedback]}</span>` : '<span class="note">none</span>'}</td>
+      <td class="note">${r.used_llm ? esc(r.model) : "rules"}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="note">Nothing yet.</td></tr>`) + "</tbody>";
+  const fmt = (area, v) => !v ? "–" : area === "ranking"
+      ? `${esc(v.preset)}, business ${v.business_share}%, priority ${v.priority_share}%`
+      : `priority ${v.priority}, boost ${v.campaign_boost}${v.excluded ? ", hidden" : ""}${v.valid_from || v.valid_to ? `, ${v.valid_from || "…"} → ${v.valid_to || "…"}` : ""}`;
+  $("#changesT").innerHTML = `<thead><tr><th>When</th><th>Who</th><th>What</th><th>Before</th><th>After</th></tr></thead><tbody>` +
+    (d.changes.length ? d.changes.map(c => `<tr><td>${when(c.at)}</td><td>${esc(c.actor)}</td><td>${c.area === "ranking" ? "Ranking strategy" : "Product " + esc(c.target)}</td>
+      <td class="note">${fmt(c.area, c.old_value)}</td><td>${fmt(c.area, c.new_value)}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="note">No changes yet.</td></tr>`) + "</tbody>";
+}
+
+boot();
+</script>
+</body>
+</html>
