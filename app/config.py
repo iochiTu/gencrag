@@ -29,7 +29,7 @@ def _env(key: str, default: str) -> str:
 class Settings:
     database_url: str = _env("DATABASE_URL", "postgresql://rag:rag@localhost:5432/kbeauty")
 
-    # ollama (local testing) | bedrock (production) | mock (no model at all, for CI)
+    # ollama (local testing) | bedrock (Amazon) | foundry (Microsoft Azure) | mock (no model, for CI)
     provider: str = _env("LLM_PROVIDER", "ollama").lower()
 
     # Every embedding model must output this size. 1024 works for bge-m3 (local),
@@ -50,8 +50,21 @@ class Settings:
     bedrock_parse_model: str = _env("BEDROCK_PARSE_MODEL", "anthropic.claude-haiku-4-5-20251001-v1:0")
     bedrock_embed_model: str = _env("BEDROCK_EMBED_MODEL", "cohere.embed-v4:0")
 
+    # --- Microsoft Foundry (Azure) ---
+    # Endpoint from the Foundry portal, e.g. https://<resource>.openai.azure.com/openai/v1/
+    foundry_endpoint: str = _env("FOUNDRY_ENDPOINT", "")
+    foundry_auth: str = _env("FOUNDRY_AUTH", "key").lower()          # key | entra
+    foundry_api_key: str = _env("FOUNDRY_API_KEY", "")
+    foundry_chat_deployment: str = _env("FOUNDRY_CHAT_DEPLOYMENT", "gpt-4.1-mini")
+    foundry_parse_deployment: str = _env("FOUNDRY_PARSE_DEPLOYMENT", "") or _env("FOUNDRY_CHAT_DEPLOYMENT", "gpt-4.1-mini")
+    foundry_embed_deployment: str = _env("FOUNDRY_EMBED_DEPLOYMENT", "text-embedding-3-large")
+    foundry_timeout_s: float = float(_env("FOUNDRY_TIMEOUT_S", "120"))
+
     # Prices in the database are in this currency (used for budget parsing and display)
     currency: str = _env("CURRENCY", "USD").upper()
+    # How to read ambiguous dates like 03/04/2027 in imported files: MDY (Mar 4) or DMY (3 Apr).
+    # Unambiguous dates (2027-03-04, 31/03/2027, Excel date cells) are always read correctly.
+    date_order: str = _env("DATE_ORDER", "MDY").upper()
 
     # --- Retrieval (ranking weights are set in the admin portal) ---
     retrieve_k: int = int(_env("RETRIEVE_K", "30"))
@@ -61,6 +74,11 @@ class Settings:
     admin_password: str = _env("ADMIN_PASSWORD", "")          # empty = portal disabled
     secret_key: str = _env("SECRET_KEY", "")                  # signs the admin login cookie
     admin_session_hours: int = int(_env("ADMIN_SESSION_HOURS", "12"))
+
+    # --- Staff chat app (/) ---
+    staff_session_days: int = int(_env("STAFF_SESSION_DAYS", "30"))
+    brand_name: str = _env("BRAND_NAME", "Gen C Beauty")
+    brand_logo_url: str = _env("BRAND_LOGO_URL", "https://cdn11.bigcommerce.com/s-kzkmuqjqk9/images/stencil/original/download1_1659212301__04676.original.png")
 
 
 settings = Settings()

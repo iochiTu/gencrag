@@ -2,6 +2,7 @@ import io
 import json
 
 import httpx
+import pytest
 
 from app.providers import BedrockProvider, OllamaProvider, extract_json
 
@@ -53,3 +54,82 @@ def test_extract_json_variants():
     assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert extract_json('Sure! {"a": 2} hope this helps') == {"a": 2}
     assert extract_json("nope") is None
+
+
+# ------------------------------------------------------------------ Microsoft Foundry
+def _foundry(handler, monkeypatch, **env):
+    from app import providers
+    from app.config import settings
+    vals = {"foundry_endpoint": "https://res.openai.azure.com/openai/v1/chat/completions?api-version=x",
+            "foundry_api_key": "k123", "foundry_auth": "key", "foundry_chat_deployment": "gpt-4.1-mini",
+            "foundry_parse_deployment": "gpt-4.1-mini", "foundry_embed_deployment": "emb-large", "embed_dim": 4, **env}
+    import dataclasses
+    monkeypatch.setattr(providers, "settings", dataclasses.replace(settings, **vals))   # test-only copy
+    return providers.FoundryProvider(client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None)
+
+
+def test_foundry_endpoint_normalisation():
+    from app.providers import foundry_base
+    assert foundry_base("https://r.openai.azure.com/") == "https://r.openai.azure.com/openai/v1"
+    assert foundry_base("https://r.openai.azure.com/openai/v1/") == "https://r.openai.azure.com/openai/v1"
+    assert foundry_base("https://r.services.ai.azure.com/models") == "https://r.services.ai.azure.com/openai/v1"
+    assert foundry_base("https://r.services.ai.azure.com/api/projects/p1") == "https://r.services.ai.azure.com/openai/v1"
+
+
+def test_foundry_chat_key_auth_json_mode_and_plain_retry(monkeypatch):
+    seen = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        seen.append((req.url.path, req.headers.get("api-key"), body))
+        if "response_format" in body:      # e.g. a DeepSeek / reasoning deployment rejecting JSON mode
+            return httpx.Response(400, json={"error": {"message": "response_format not supported"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"steps": []}'}}]})
+
+    p = _foundry(handler, monkeypatch)
+    assert p.chat("sys", "user") == '{"steps": []}'
+    assert seen[0][0] == "/openai/v1/chat/completions" and seen[0][1] == "k123"
+    assert seen[0][2]["model"] == "gpt-4.1-mini" and "response_format" not in seen[1][2]
+    p.chat("sys", "again")
+    assert "response_format" not in seen[2][2]                 # remembered: no wasted call next time
+
+
+def test_foundry_errors_are_explained_and_429_retried(monkeypatch):
+    from app.providers import ProviderError
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"retry-after": "1"})
+        if req.url.path.endswith("/embeddings"):
+            return httpx.Response(404, json={"error": {"code": "DeploymentNotFound"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    p = _foundry(handler, monkeypatch)
+    assert p.chat("s", "u") == "{}" and calls["n"] == 2
+    with pytest.raises(ProviderError, match="deployment 'emb-large' was not found"):
+        p.embed(["x"])
+    p2 = _foundry(lambda r: httpx.Response(401), monkeypatch)
+    with pytest.raises(ProviderError, match="rejected the credentials"):
+        p2.chat("s", "u")
+    p3 = _foundry(lambda r: httpx.Response(200), monkeypatch, foundry_api_key="")
+    with pytest.raises(ProviderError, match="FOUNDRY_API_KEY is empty"):
+        p3.chat("s", "u")
+
+
+def test_foundry_embeddings_batches_dimensions_and_order(monkeypatch):
+    bodies = []
+
+    def handler(req):
+        b = json.loads(req.content)
+        bodies.append(b)
+        if "dimensions" in b:
+            return httpx.Response(400, json={"error": {"message": "dimensions not supported"}})
+        data = [{"index": i, "embedding": [float(i)] * 4} for i in range(len(b["input"]))][::-1]   # out of order
+        return httpx.Response(200, json={"data": data})
+
+    p = _foundry(handler, monkeypatch)
+    vecs = p.embed([f"t{i}" for i in range(20)])
+    assert len(vecs) == 20 and vecs[0][0] == 0.0 and vecs[15][0] == 15.0 and vecs[16][0] == 0.0
+    assert bodies[0]["dimensions"] == 4 and all("dimensions" not in b for b in bodies[1:])

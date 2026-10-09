@@ -36,19 +36,86 @@ def test_header_synonyms_prices_and_numeric_skus():
     assert [r["sku"] for r in rows] == ["1001", "A-2"] and [r["price"] for r in rows] == [18.5, 1299.0]
 
 
+class FakeConn:
+    """Stands in for the database in finalise_rows: knows which SKUs already exist."""
+    def __init__(self, skus): self.skus = skus
+    def execute(self, *_):
+        class R:
+            def __init__(s, rows): s.rows = rows
+            def fetchall(s): return s.rows
+        return R([{"sku": x} for x in self.skus])
+
+
 def test_validation_messages_use_excel_row_numbers():
     data = xlsx([("S1", "A", 10, "desc " * 20), ("S1", "B", 12, "desc " * 20), ("", "C", 5, "d"),
                  ("S3", "D", "free", "desc " * 20), ("S4", "", 5, "")])
     p = read_table("f.xlsx", data)
-    errs = {(i["row"], i["message"].split(" (")[0]) for i in p["issues"] if i["level"] == "error"}
+    importer.finalise_rows(FakeConn([]), p)
+    errs = {(i["row"], i["message"].split(" (")[0].split(";")[0]) for i in p["issues"] if i["level"] == "error"}
     assert (3, "SKU S1 appears twice") in errs and (4, "SKU is empty") in errs
-    assert (5, "Price is missing or not a number") in errs and (6, "Name is empty") in errs
+    assert (5, "New product needs Price") in errs and (6, "New product needs Name") in errs
+    warns = [i["message"] for i in p["issues"] if i["level"] == "warning"]
+    assert any("'free' is not a number" in w for w in warns)
     assert [r["ok"] for r in p["rows"]] == [True, False, False, False, False]
 
 
+def test_messy_cells_are_tolerated():
+    from datetime import date, datetime
+    data = xlsx([
+        ("A1", "Toner", "N/A", "#N/A", "-", "TBD", "31/12/2027", ""),             # existing: blanks keep values
+        ("A2", "Serum", "$24.00", "Serum for dry skin. " * 4, "abc", "lots", "2027-06", "Water, Retinol, Parfum"),
+        ("A3", "Cream", 30, None, None, 12, datetime(2027, 3, 4), None),           # Excel date cell
+        ("A4", "Mask", 3, "Sheet mask for dull skin, all skin types.", "", "", "03/04/2027", "  "),
+        ("A5", "Old", 9, "Old cream for dry skin and fine lines.", "", "", "2020-01-01", ""),
+        (None, None, "Total", None, None, None, None, None),                        # totals row: ignored
+    ], headers=("SKU", "Name", "Price", "Description", "Cost", "Stock", "Expiry", "Ingredients"))
+    p = read_table("f.xlsx", data, date_order="MDY")
+    importer.finalise_rows(FakeConn(["A1"]), p)
+    rows = {r["sku"]: r for r in p["rows"]}
+    assert set(rows) == {"A1", "A2", "A3", "A4", "A5"} and all(r["ok"] for r in rows.values())
+    a1 = rows["A1"]
+    assert a1["price"] is None and a1["description"] is None and a1["cost"] is None and a1["stock"] is None
+    assert a1["expiry"] == "2027-12-31"                                            # day > 12: unambiguous
+    assert rows["A2"]["price"] == 24 and rows["A2"]["cost"] is None and rows["A2"]["expiry"] == "2027-06-30"
+    assert rows["A3"]["expiry"] == "2027-03-04" and rows["A4"]["expiry"] == "2027-03-04"
+    msgs = " | ".join(i["message"] for i in p["issues"])
+    assert "Empty price, description: current value kept" in msgs                   # A1 exists
+    assert "Cost 'abc' is not a number" in msgs and "Stock 'lots'" in msgs
+    assert "read as 04 Mar 2027" in msgs                                            # ambiguous date explained
+    assert "No description" in msgs                                                 # A3 is new, no description
+    assert "is in the past" in msgs                                                 # A5 expired
+    d, note = importer.parse_date("03/04/2027", "DMY")
+    assert d == date(2027, 4, 3) and "day/month" in note
+    assert importer.parse_date("Mar 2027")[0] == date(2027, 3, 31)
+    assert importer.parse_date("20270315")[0] == date(2027, 3, 15)
+    assert importer.parse_date("soon")[0] is None
+
+
+def test_ingredients_column_is_used_when_description_has_none():
+    assert importer.full_description("Night serum.", "Water, Retinol") == "Night serum.\nIngredients: Water, Retinol"
+    assert importer.full_description("Serum. Ingredients: Water", "Water, Retinol") == "Serum. Ingredients: Water"
+    assert importer.full_description(None, "Water") == "Ingredients: Water"
+
+
+def test_update_only_file_with_sku_and_price():
+    p = read_table("prices.csv", b"SKU,Price\nA1,19.99\nA2,\n")
+    importer.finalise_rows(FakeConn(["A1", "A2"]), p)
+    assert [r["ok"] for r in p["rows"]] == [True, True] and p["rows"][1]["price"] is None
+    with pytest.raises(ValueError, match="Only a SKU column"):
+        read_table("x.csv", b"SKU\nA1\n")
+
+
+def test_flags_from_description_text_when_no_ingredient_list():
+    a = extract_attributes(None, "Night Serum", "Night serum with 0.3% retinol for fine lines. Fragrance-free.", use_ai=False)
+    assert a["text_flags"] == ["retinoid"] and "pregnancy" in a["avoid_for"] and a["needs_review"]
+    assert "description mentions: retinoid" in a["review_note"]
+    b = extract_attributes(None, "Mystery", "", use_ai=False)
+    assert b["needs_review"] and "no description" in b["review_note"]
+
+
 def test_missing_required_column_is_explained():
-    with pytest.raises(ValueError, match="Missing column"):
-        read_table("f.xlsx", xlsx([("S1", "A", 10)], headers=("SKU", "Name", "Price")))
+    with pytest.raises(ValueError, match="Missing column: SKU"):
+        read_table("f.xlsx", xlsx([("A", 10, "d")], headers=("Name", "Price", "Description")))
     with pytest.raises(ValueError, match="Excel"):
         read_table("f.pdf", b"%PDF")
 
@@ -110,6 +177,8 @@ def client():
     db.run_sql_file("seed_sample.sql")
     c = TestClient(app)
     assert c.post("/admin/api/login", json={"name": "Ops", "password": "test-pass"}).status_code == 200
+    from tests.conftest import staff_login
+    staff_login(c)
     return c
 
 
@@ -195,3 +264,31 @@ def test_manual_edit_of_ai_reading(client):
 def test_preview_rejects_bad_files(client):
     r = client.post("/admin/api/import/preview", json={"filename": "x.xlsx", "content_b64": base64.b64encode(b"nope").decode()})
     assert r.status_code == 400 and "Could not read" in r.json()["detail"]
+
+
+@pytestmark_db
+def test_import_with_blanks_keeps_existing_values_and_hides_unsafe(client):
+    upload_and_run(client, xlsx(NEW))
+    rows = [("NW-001", "", "", "", "2027-12-31"),                                   # blanks: keep, add expiry
+            ("NW-004", "Mystery Night Serum", 33, "Night serum with retinol for fine lines, dry skin.", "N/A"),
+            ("NW-005", "Expired Toner", 12, "Toner for oily skin with breakouts.\nIngredients: Water", "2020-01-01")]
+    pv, job = upload_and_run(client, xlsx(rows, headers=("SKU", "Name", "Price", "Description", "Expiry")))
+    assert job["status"] == "done", job
+    prods = {p["sku"]: p for p in client.get("/admin/api/products").json()["products"]}
+    assert prods["NW-001"]["name"] == "Cica Calming Serum" and prods["NW-001"]["price"] == 24
+    assert prods["NW-001"]["expiry_date"] == "2027-12-31"
+    assert prods["NW-004"]["ingredients_known"] is False and prods["NW-004"]["needs_review"] is True
+    # retinol mentioned in text -> hidden for pregnancy even without an ingredient list
+    r = client.post("/recommend", json={"profile": {"concerns": ["wrinkles"], "avoid": ["pregnancy"]}, "top_n": 5}).json()
+    assert "NW-004" not in [o["sku"] for st in r.get("steps", []) for o in st["options"]]
+    # unknown ingredients: hidden when the customer must avoid fragrance, shown with a warning if set to "show"
+    q = {"profile": {"concerns": ["wrinkles"], "skin_type": "dry", "avoid": ["fragrance"]}, "top_n": 5, "options": 4}
+    assert "NW-004" not in [o["sku"] for st in client.post("/recommend", json=q).json().get("steps", []) for o in st["options"]]
+    rk = client.get("/admin/api/ranking").json()["settings"]
+    client.put("/admin/api/ranking", json={**rk, "unknown_ingredients": "show"})
+    shown = [o for st in client.post("/recommend", json=q).json()["steps"] for o in st["options"] if o["sku"] == "NW-004"]
+    client.put("/admin/api/ranking", json=rk)
+    assert shown and any("check the label" in n for n in shown[0]["notes"])
+    # expired products are never recommended
+    r = client.post("/recommend", json={"profile": {"skin_type": "oily", "concerns": ["acne"]}, "top_n": 5, "options": 4}).json()
+    assert "NW-005" not in [o["sku"] for st in r["steps"] for o in st["options"]]

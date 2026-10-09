@@ -41,6 +41,9 @@ class RankingSettings(BaseModel):
     min_skin_fit: float = Field(0.0, ge=0, le=1, description="Hide products that match less than this share of the customer's concerns")
     use_llm_rerank: bool = True
     options_per_step: int = Field(3, ge=1, le=4, description="How many product choices staff see per routine step")
+    min_days_before_expiry: int = Field(30, ge=0, le=365, description="Hide products expiring within this many days")
+    unknown_ingredients: Literal["hide", "show"] = Field(
+        "hide", description="Products without an ingredient list, when the customer must avoid something")
 
     def weights(self) -> Weights:
         b, p = self.business_share / 100, self.priority_share / 100

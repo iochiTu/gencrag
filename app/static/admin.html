@@ -4,25 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Recommender Admin</title>
+<link rel="icon" href="/static/icons/favicon.png">
+<link href="https://fonts.googleapis.com/css2?family=Cabin:wght@400;600;700&family=Nunito:wght@700;800&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light;
     --bg:#f6f6f4; --card:#ffffff; --ink:#0b0b0b; --quiet:#52514e; --faint:#8a8984; --line:#e3e2dd; --hover:#f1f0ec;
-    --accent:#c2416b; --accent-bg:#fdf2f6; --on-accent:#ffffff; --good:#008300; --bad:#c43c3b; --warn-bg:#fff6e0;
+    --accent:#212152; --accent-bg:#ECECF4; --on-accent:#ffffff; --navy:#0F0F2D; --good:#008300; --bad:#c43c3b; --warn-bg:#fff6e0;
     --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
       color-scheme: dark;
       --bg:#121211; --card:#1a1a19; --ink:#ffffff; --quiet:#c3c2b7; --faint:#8f8e86; --line:#33332f; --hover:#24241f;
-      --accent:#e86d96; --accent-bg:#3a1f29; --on-accent:#1a0d12; --good:#3fb43f; --bad:#e66767; --warn-bg:#3a3020;
+      --accent:#B4B4F0; --accent-bg:#26264A; --on-accent:#0F0F2D; --navy:#0F0F2D; --good:#3fb43f; --bad:#e66767; --warn-bg:#3a3020;
       --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
     }
   }
   * { box-sizing:border-box; }
-  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); font-size:14px; }
-  header { display:flex; align-items:center; gap:16px; padding:12px 24px; background:var(--card); border-bottom:1px solid var(--line); }
-  header h1 { font-size:16px; margin:0; }
+  body { margin:0; font-family:"Cabin",Arial,Helvetica,sans-serif; background:var(--bg); color:var(--ink); font-size:14px; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 24px; background:var(--card); border-bottom:1px solid var(--line); border-top:6px solid var(--navy); flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; letter-spacing:.04em; font-weight:700; }
+  header h1 small { font-family:"Nunito",Arial,sans-serif; font-weight:800; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--quiet); margin-left:6px; }
   nav { display:flex; gap:4px; }
   nav button { border:0; background:none; padding:8px 12px; border-radius:8px; font:inherit; color:var(--quiet); cursor:pointer; }
   nav button.on { background:var(--accent-bg); color:var(--accent); font-weight:600; }
@@ -35,7 +38,8 @@
   h2 { font-size:16px; margin:0 0 4px; } .sub { color:var(--quiet); margin:0 0 16px; font-size:13px; }
   h3 { font-size:14px; margin:20px 0 8px; }
   button.btn { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:7px 14px; border-radius:8px; font:inherit; cursor:pointer; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-family:"Nunito",Arial,sans-serif; font-weight:800; text-transform:uppercase; letter-spacing:.02em; font-size:12.5px; border-radius:5px; }
+  .chart rect.bar:hover { opacity:.75; }
   button:disabled { opacity:.5; cursor:default; }
   input, select, textarea { font:inherit; color:var(--ink); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
   textarea { width:100%; min-height:56px; }
@@ -112,12 +116,13 @@
 
 <div id="app" class="hidden">
 <header>
-  <h1>Recommender admin</h1>
+  <h1>GEN'C BEAUTY<small>Recommender admin</small></h1>
   <nav>
     <button data-tab="ranking" class="on">Ranking strategy</button>
     <button data-tab="import">Import products</button>
     <button data-tab="products">Products &amp; campaigns</button>
-    <button data-tab="activity">Activity &amp; feedback</button>
+    <button data-tab="staff">Staff accounts</button>
+    <button data-tab="activity">Activity &amp; analytics</button>
   </nav>
   <div class="who"><span id="who"></span><button class="btn" id="logout">Sign out</button></div>
 </header>
@@ -160,6 +165,16 @@
       </label>
       <label><input type="checkbox" id="llm"> Use the AI model to pick and explain (off = rule-based only)</label>
     </div>
+    <h3>Missing or expiring data</h3>
+    <div class="row">
+      <label>Don't recommend products that expire within
+        <select id="expsel"><option value="0">0 days (only expired)</option><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option><option value="180">180 days</option></select>
+      </label>
+      <label>Products without an ingredient list, when the customer must avoid something
+        <select id="unksel"><option value="hide">Hide them (safest)</option><option value="show">Show them with a "check the label" warning</option></select>
+      </label>
+    </div>
+    <p class="note">Products with no expiry date are treated as not expiring. Products with no ingredient list are always shown to customers with no restrictions.</p>
     <div class="warn hidden" id="profitWarn">Business value is above 50%. Products that match few of the customer's concerns can now be shown. Consider a minimum skin match, and watch the "Not suitable" rate in Activity: staff stop trusting the tool if picks feel pushy.</div>
 
     <div class="row" style="margin-top:20px">
@@ -244,7 +259,25 @@
       <label class="note"><input type="checkbox" id="pInactive"> Show inactive</label>
       <span class="note" id="pCount"></span>
     </div>
+    <div class="warn hidden" id="embedWarn"><span id="embedText"></span> <button class="btn" id="embedBtn">Retry now</button></div>
     <div class="scroll"><table id="pTable"></table></div>
+  </div>
+</section>
+
+<!-- ============ Staff accounts ============ -->
+<section data-panel="staff" class="hidden">
+  <div class="card">
+    <h2>Staff accounts</h2>
+    <p class="sub">Everyone who uses the chat app signs in with their own account, so analytics show who used it. New accounts get a temporary password; they choose their own at first sign-in.</p>
+    <form id="userForm" class="row" style="align-items:flex-end">
+      <label class="note">Username<br><input id="nuUser" required placeholder="e.g. mina.park" autocapitalize="none" style="width:170px"></label>
+      <label class="note">Full name<br><input id="nuName" required placeholder="Mina Park" style="width:200px"></label>
+      <label class="note">Role<br><select id="nuRole"><option value="staff">Staff</option><option value="manager">Manager</option></select></label>
+      <button class="btn primary">Add account</button>
+    </form>
+    <div class="warn hidden" id="tempPw"></div>
+    <div class="err" id="userErr"></div>
+    <div class="scroll" style="margin-top:12px"><table id="usersT"></table></div>
   </div>
 </section>
 
@@ -252,8 +285,30 @@
 <section data-panel="activity" class="hidden">
   <div class="card">
     <div class="row" style="justify-content:space-between">
-      <div><h2>Activity &amp; feedback</h2><p class="sub" style="margin:0">How staff use the recommender and how customers respond.</p></div>
-      <select id="days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
+      <div><h2>Chat analytics</h2><p class="sub" style="margin:0">How staff use the chat assistant: every message, recommendation, product question and sale is logged.</p></div>
+      <div class="row"><select id="days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last 12 months</option></select>
+        <button class="btn" id="csvBtn">Export CSV</button></div>
+    </div>
+    <div class="tiles" id="aTiles" style="margin-top:16px"></div>
+    <h3>Chats per day</h3>
+    <div id="aChart" class="chart"></div>
+    <div class="grid2" style="margin-top:8px">
+      <div><h3>By staff member</h3><div class="scroll"><table id="aStaff"></table></div></div>
+      <div><h3>What staff asked for</h3><div class="scroll"><table id="aIntents"></table></div>
+        <h3>Top skin concerns</h3><div class="scroll"><table id="aConcerns"></table></div></div>
+    </div>
+    <div class="grid2">
+      <div><h3>Most asked-about products</h3><div class="scroll"><table id="aAsked"></table></div></div>
+      <div><h3>Customer skin types</h3><div class="scroll"><table id="aSkin"></table></div></div>
+    </div>
+    <h3>Searches with no suitable product</h3>
+    <p class="note" style="margin-top:-4px">Possible gaps in the catalog, or budgets and restrictions that rule everything out.</p>
+    <div class="scroll"><table id="aGaps"></table></div>
+    <div id="aErrWrap" class="hidden"><h3>Errors</h3><div class="scroll"><table id="aErrors"></table></div></div>
+  </div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><h2>Recommendations &amp; feedback</h2><p class="sub" style="margin:0">How customers respond to what staff offered.</p></div>
     </div>
     <div class="tiles" id="tiles" style="margin-top:16px"></div>
   </div>
@@ -304,7 +359,7 @@ $("#logout").onclick = async () => { await api("/logout", {method:"POST"}); show
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll("[data-panel]").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== b.dataset.tab));
-  ({ranking: loadRanking, import: loadImport, products: loadProducts, activity: loadActivity})[b.dataset.tab]();
+  ({ranking: loadRanking, import: loadImport, products: loadProducts, staff: loadStaff, activity: loadActivity})[b.dataset.tab]();
 });
 
 /* ---------------- Ranking strategy ---------------- */
@@ -326,6 +381,7 @@ function renderRanking() {
   $("#fitPct").textContent = (100 - s.business_share) + "%"; $("#bizPct").textContent = s.business_share + "%";
   $("#marPct").textContent = (100 - s.priority_share) + "%"; $("#priPct").textContent = s.priority_share + "%";
   $("#minfit").value = String(s.min_skin_fit); $("#llm").checked = s.use_llm_rerank; $("#optsel").value = String(s.options_per_step);
+  $("#expsel").value = String(s.min_days_before_expiry); $("#unksel").value = s.unknown_ingredients;
   document.querySelectorAll(".preset").forEach(b => b.classList.toggle("on", b.dataset.k === s.preset));
   const w = weights(s);
   $("#wbar").innerHTML = W.map(([k,,c]) => `<div style="width:${w[k]*100}%;background:var(${c})" title="${k}: ${pct(w[k])}"></div>`).join("");
@@ -343,6 +399,8 @@ $("#pri").oninput = e => { draft.priority_share = +e.target.value; matchPreset()
 $("#minfit").onchange = e => { draft.min_skin_fit = +e.target.value; renderRanking(); };
 $("#llm").onchange = e => { draft.use_llm_rerank = e.target.checked; renderRanking(); };
 $("#optsel").onchange = e => { draft.options_per_step = +e.target.value; renderRanking(); };
+$("#expsel").onchange = e => { draft.min_days_before_expiry = +e.target.value; renderRanking(); };
+$("#unksel").onchange = e => { draft.unknown_ingredients = e.target.value; renderRanking(); };
 $("#resetRanking").onclick = () => { draft = {...saved}; renderRanking(); };
 $("#saveRanking").onclick = async () => {
   try { await api("/ranking", {method:"PUT", body: JSON.stringify(draft)}); await loadRanking(); }
@@ -382,12 +440,15 @@ function renderProducts() {
                                  && (!onlyReview || p.needs_review) && (showInactive || p.is_active));
   const toCheck = PRODUCTS.filter(p => p.needs_review && p.is_active).length;
   $("#pCount").textContent = `${rows.length} of ${PRODUCTS.length} products` + (toCheck ? ` · ${toCheck} to check` : "");
+  const unsearchable = PRODUCTS.filter(p => p.is_active && !p.searchable).length;
+  $("#embedWarn").classList.toggle("hidden", !unsearchable);
+  $("#embedText").textContent = `${unsearchable} active product(s) are saved but not searchable yet (the model was unreachable).`;
   $("#pTable").innerHTML = `<thead><tr><th>Product</th><th>AI reading</th><th class="num">Price</th><th class="num">Margin</th><th class="num">Stock</th>
     <th>Priority</th><th>Campaign boost</th><th>From</th><th>To</th><th>Hide</th><th class="num">Shown 30d</th><th class="num">Sold 30d</th><th></th></tr></thead><tbody>` +
     rows.map(p => {
       const boostOpts = BOOSTS.some(([v]) => v === p.campaign_boost) ? BOOSTS : [...BOOSTS, [p.campaign_boost, "+" + p.campaign_boost]];
       return `<tr data-sku="${esc(p.sku)}">
-      <td><a href="#" data-detail="${esc(p.sku)}">${esc(p.name)}</a><div class="note">${esc(p.sku)} · ${esc(p.category)}${p.boost_active ? ' · <span class="tag on">campaign live</span>' : ""}${!p.is_active ? ' · <span class="tag">inactive</span>' : ""}${!p.searchable && p.is_active ? ' · <span class="tag bad">not searchable</span>' : ""}</div></td>
+      <td><a href="#" data-detail="${esc(p.sku)}">${esc(p.name)}</a><div class="note">${esc(p.sku)} · ${esc(p.category)}${p.boost_active ? ' · <span class="tag on">campaign live</span>' : ""}${!p.is_active ? ' · <span class="tag">inactive</span>' : ""}${!p.searchable && p.is_active ? ' · <span class="tag bad">not searchable</span>' : ""}${expiryTag(p.expiry_date)}${!p.ingredients_known ? ' · <span class="tag bad" title="Hidden from customers who must avoid an ingredient">no ingredients</span>' : ""}</div></td>
       <td class="note" style="max-width:240px">${reading(p)}</td>
       <td class="num">${money(p.price)}</td><td class="num">${pct(p.margin_pct)}</td><td class="num">${p.stock_qty ?? "–"}</td>
       <td><select data-f="priority">${[1,2,3,4,5].map(n => `<option ${n===p.priority?"selected":""} value="${n}">${n}${n===3?" (normal)":n===5?" (top)":""}</option>`).join("")}</select></td>
@@ -399,6 +460,19 @@ function renderProducts() {
       <td><button class="btn primary" data-save disabled>Save</button></td></tr>`; }).join("") + "</tbody>";
 }
 $("#pSearch").oninput = renderProducts; $("#pReview").onchange = renderProducts; $("#pInactive").onchange = renderProducts;
+function expiryTag(d) {
+  if (!d) return "";
+  const days = Math.round((new Date(d + "T00:00:00") - new Date(new Date().toDateString())) / 864e5);
+  if (days < 0) return ` · <span class="tag err">expired ${esc(d)}</span>`;
+  if (days <= 90) return ` · <span class="tag bad">expires in ${days} days</span>`;
+  return ` · <span class="tag">exp. ${esc(d)}</span>`;
+}
+$("#embedBtn").onclick = async () => {
+  $("#embedBtn").disabled = true;
+  try { await api("/embed-missing", {method:"POST"}); await loadProducts(); }
+  catch (e) { $("#embedText").textContent = e.message; }
+  finally { $("#embedBtn").disabled = false; }
+};
 function ages(lo, hi) { return lo && hi ? `ages ${lo}-${hi}` : lo ? `ages ${lo}+` : hi ? `up to ${hi}` : ""; }
 function reading(p) {
   const bits = [(p.suitable_skin_types || []).join(", "), (p.target_concerns || []).join(", "), ages(p.min_age, p.max_age),
@@ -420,8 +494,74 @@ $("#pTable").addEventListener("click", async e => {
 
 /* ---------------- Activity ---------------- */
 $("#days").onchange = loadActivity;
+$("#csvBtn").onclick = async () => {
+  const r = await fetch("/admin/api/analytics/export.csv?days=" + $("#days").value); if (!r.ok) return;
+  const a = document.createElement("a"); a.href = URL.createObjectURL(await r.blob()); a.download = `recommender-analytics-${$("#days").value}d.csv`; a.click();
+};
+async function loadAnalytics() {
+  const a = await api("/analytics?days=" + $("#days").value), t = a.totals;
+  const share = (n, of) => of ? pct(n / of) : "–";
+  $("#aTiles").innerHTML = [
+    [t.chats, "Messages to the assistant"], [t.conversations, "Customer conversations"], [t.active_staff, "Staff using it"],
+    [t.recommendations, "Recommendations given"], [t.product_questions, "Product questions"],
+    [share(t.no_match, t.chats), "No suitable product"], [t.avg_ms == null ? "–" : (t.avg_ms / 1000).toFixed(1) + " s", `Avg response (90% under ${t.p90_ms == null ? "–" : (t.p90_ms / 1000).toFixed(1) + " s"})`],
+    [share(t.ai_answers, t.ai_eligible), "Answered by the AI model"], [t.sold, "Sales marked by staff"],
+  ].map(([v, l]) => `<div class="tile"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+  // chats per day: single series, bars from zero, value on hover, recessive axis
+  const days = a.daily, W = 900, H = 180, pad = 28, max = Math.max(1, ...days.map(d => d.chats));
+  const bw = days.length ? Math.max(4, Math.min(36, (W - pad * 2) / days.length - 4)) : 0;
+  $("#aChart").innerHTML = days.length ? `<svg viewBox="0 0 ${W} ${H + 24}" width="100%" role="img" aria-label="Chats per day">
+    <line x1="${pad}" x2="${W - pad}" y1="${H}" y2="${H}" stroke="var(--line)"/>
+    <text x="${pad}" y="14" font-size="11" fill="var(--quiet)">${max}</text>
+    ${days.map((d, i) => { const x = pad + i * ((W - pad * 2) / days.length) + 2, h = Math.round((H - 24) * d.chats / max);
+      return `<rect class="bar" x="${x}" y="${H - h}" width="${bw}" height="${Math.max(h, 1)}" rx="3" fill="var(--accent)"><title>${d.day}: ${d.chats} messages, ${d.recommendations} recommendations, ${d.sold} sold</title></rect>
+        ${days.length <= 31 && (i % Math.ceil(days.length / 10) === 0) ? `<text x="${x + bw / 2}" y="${H + 16}" font-size="11" text-anchor="middle" fill="var(--quiet)">${d.day.slice(5)}</text>` : ""}`; }).join("")}
+  </svg>` : `<p class="note">No chats in this period yet.</p>`;
+  const tbl = (el, head, rows, f, empty) => { $(el).innerHTML = `<thead><tr>${head.map(h => `<th${h.startsWith("#") ? ' class="num"' : ""}>${h.replace("#", "")}</th>`).join("")}</tr></thead><tbody>` +
+    (rows.length ? rows.map(f).join("") : `<tr><td colspan="${head.length}" class="note">${empty || "Nothing yet."}</td></tr>`) + "</tbody>"; };
+  tbl("#aStaff", ["Staff", "#Messages", "#Recommendations", "#Questions", "#Sold", "Last active"], a.staff,
+      r => `<tr><td>${esc(r.username)}</td><td class="num">${r.chats}</td><td class="num">${r.recommendations}</td><td class="num">${r.questions}</td><td class="num">${r.sold}</td><td class="note">${esc(r.last_active)}</td></tr>`);
+  const INT = {recommendation: "Recommendation", product_question: "Product question", clarify: "Needed more detail", reset: "New customer", error: "Error"};
+  tbl("#aIntents", ["Type", "#Count"], a.intents, r => `<tr><td>${INT[r.intent] || esc(r.intent)}</td><td class="num">${r.n}</td></tr>`);
+  tbl("#aConcerns", ["Concern", "#Count"], a.concerns, r => `<tr><td>${esc(r.concern)}</td><td class="num">${r.n}</td></tr>`);
+  tbl("#aSkin", ["Skin type", "#Count"], a.skin_types, r => `<tr><td>${esc(r.skin_type)}</td><td class="num">${r.n}</td></tr>`);
+  tbl("#aAsked", ["Product", "#Questions"], a.asked_products, r => `<tr><td>${esc(r.name || r.sku)}<div class="note">${esc(r.sku)}</div></td><td class="num">${r.n}</td></tr>`);
+  tbl("#aGaps", ["When", "Staff", "Message", "Customer"], a.no_match, r => { const p = r.profile || {};
+    return `<tr><td class="note">${esc(r.at)}</td><td>${esc(r.username)}</td><td>${esc(r.message)}</td><td class="note">${esc([p.skin_type, (p.concerns || []).join(", "), (p.avoid || []).length ? "avoid " + p.avoid.join(", ") : "", p.budget_max ? "≤ " + money(p.budget_max) : ""].filter(Boolean).join(" · "))}</td></tr>`; }, "None. Every search found something.");
+  $("#aErrWrap").classList.toggle("hidden", !a.errors.length);
+  tbl("#aErrors", ["When", "Staff", "Message", "Detail"], a.errors, r => `<tr><td class="note">${esc(r.at)}</td><td>${esc(r.username)}</td><td>${esc(r.message)}</td><td class="note">${esc((r.meta || {}).error || "")}</td></tr>`);
+}
+
+/* ---------------- Staff accounts ---------------- */
+async function loadStaff() {
+  const d = await api("/users");
+  $("#usersT").innerHTML = `<thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Last sign-in</th><th class="num">Messages 30d</th><th></th></tr></thead><tbody>` +
+    (d.users.length ? d.users.map(u => `<tr><td>${esc(u.display_name)}</td><td>${esc(u.username)}</td><td>${esc(u.role)}</td>
+      <td>${u.is_active ? (u.must_change_password ? '<span class="tag bad">waiting for first sign-in</span>' : '<span class="tag on">active</span>') : '<span class="tag">disabled</span>'}</td>
+      <td class="note">${u.last_login_at ? when(u.last_login_at) : "never"}</td><td class="num">${u.chats_30d}</td>
+      <td style="white-space:nowrap"><button class="btn" data-reset="${u.id}" data-name="${esc(u.display_name)}">Reset password</button>
+        <button class="btn" data-toggle="${u.id}" data-active="${u.is_active}">${u.is_active ? "Disable" : "Enable"}</button></td></tr>`).join("")
+      : `<tr><td colspan="7" class="note">No staff accounts yet. Add the first one above.</td></tr>`) + "</tbody>";
+}
+$("#userForm").onsubmit = async e => {
+  e.preventDefault(); $("#userErr").textContent = ""; $("#tempPw").classList.add("hidden");
+  try {
+    const r = await api("/users", {method: "POST", body: JSON.stringify({username: $("#nuUser").value, display_name: $("#nuName").value, role: $("#nuRole").value})});
+    showTemp(`Account <b>${esc(r.user.username)}</b> created. Temporary password: <b>${esc(r.temporary_password)}</b> — give it to them in person; it is shown only once.`);
+    $("#nuUser").value = ""; $("#nuName").value = ""; loadStaff();
+  } catch (err) { $("#userErr").textContent = err.message; }
+};
+function showTemp(html) { $("#tempPw").innerHTML = html; $("#tempPw").classList.remove("hidden"); }
+$("#usersT").addEventListener("click", async e => {
+  const rs = e.target.closest("[data-reset]");
+  if (rs) { const r = await api(`/users/${rs.dataset.reset}/reset`, {method: "POST"});
+    showTemp(`New temporary password for <b>${esc(rs.dataset.name)}</b>: <b>${esc(r.temporary_password)}</b>. They have been signed out on all devices.`); loadStaff(); return; }
+  const tg = e.target.closest("[data-toggle]");
+  if (tg) { await api(`/users/${tg.dataset.toggle}`, {method: "PUT", body: JSON.stringify({is_active: tg.dataset.active !== "true"})}); loadStaff(); }
+});
 const FB = {accepted:"Good pick", swapped:"Swapped", sold:"Sold", rejected:"Not suitable"};
 async function loadActivity() {
+  loadAnalytics();
   const d = await api("/activity?days=" + $("#days").value), k = d.kpis;
   const share = (n, of) => of ? pct(n / of) : "–";
   $("#tiles").innerHTML = [
@@ -440,11 +580,16 @@ async function loadActivity() {
       <td>${r.feedback ? `<span class="tag ${r.feedback === "sold" ? "on" : ""}">${FB[r.feedback]}</span>` : '<span class="note">none</span>'}</td>
       <td class="note">${r.used_llm ? esc(r.model) : "rules"}</td></tr>`).join("")
       : `<tr><td colspan="6" class="note">Nothing yet.</td></tr>`) + "</tbody>";
+  const generic = v => esc(Object.entries(v).filter(([, x]) => x !== null && x !== "" && !(Array.isArray(x) && !x.length))
+      .map(([k, x]) => `${k.replace(/_/g, " ")}: ${Array.isArray(x) ? x.join(", ") : typeof x === "object" ? JSON.stringify(x) : x}`).join("; "));
   const fmt = (area, v) => !v ? "–" : area === "ranking"
       ? `${esc(v.preset)}, business ${v.business_share}%, priority ${v.priority_share}%`
-      : `priority ${v.priority}, boost ${v.campaign_boost}${v.excluded ? ", hidden" : ""}${v.valid_from || v.valid_to ? `, ${v.valid_from || "…"} → ${v.valid_to || "…"}` : ""}`;
+      : area === "product" && "priority" in v && !("category" in v)
+      ? `priority ${v.priority}, boost ${v.campaign_boost}${v.excluded ? ", hidden" : ""}${v.valid_from || v.valid_to ? `, ${v.valid_from || "…"} → ${v.valid_to || "…"}` : ""}`
+      : generic(v);
+  const WHAT = {ranking: () => "Ranking strategy", product: t => "Product " + esc(t), user: t => "Staff account " + esc(t), import: t => "Import " + esc(t)};
   $("#changesT").innerHTML = `<thead><tr><th>When</th><th>Who</th><th>What</th><th>Before</th><th>After</th></tr></thead><tbody>` +
-    (d.changes.length ? d.changes.map(c => `<tr><td>${when(c.at)}</td><td>${esc(c.actor)}</td><td>${c.area === "ranking" ? "Ranking strategy" : "Product " + esc(c.target)}</td>
+    (d.changes.length ? d.changes.map(c => `<tr><td>${when(c.at)}</td><td>${esc(c.actor)}</td><td>${(WHAT[c.area] || (t => esc(c.area) + " " + esc(t)))(c.target)}</td>
       <td class="note">${fmt(c.area, c.old_value)}</td><td>${fmt(c.area, c.new_value)}</td></tr>`).join("")
       : `<tr><td colspan="5" class="note">No changes yet.</td></tr>`) + "</tbody>";
 }
@@ -469,7 +614,9 @@ async function openDetail(sku) {
       <b>Category</b><select name="category">${v.categories.map(c => `<option ${c === p.category ? "selected" : ""}>${c}</option>`).join("")}</select>
       <b>Skin types</b>${checks("skin", v.skin_types, p.suitable_skin_types || [])}
       <b>Concerns</b>${checks("concern", v.concerns, p.target_concerns || [], CONCERN_L)}
-      <b>Not for customers who avoid</b>${checks("avoid", v.avoid, p.avoid_for || [], AVOID_L)}
+      <b>Not for customers who avoid</b><div>${checks("avoid", v.avoid, [...new Set([...(p.avoid_for || []), ...(p.text_flags || [])])], AVOID_L)}
+        ${(p.text_flags || []).length ? `<div class="note">Pre-ticked because the description mentions: ${esc(p.text_flags.join(", "))}. Untick if that is wrong (e.g. "retinol alternative").</div>` : ""}</div>
+      <b>Expiry date</b><div><input type="date" name="expiry" value="${p.expiry_date ?? ""}"> <span class="note">Empty = not tracked</span></div>
       <b>Age range</b><div class="row"><input type="number" name="min_age" min="10" max="100" placeholder="From" value="${p.min_age ?? ""}" style="width:90px"> to <input type="number" name="max_age" min="10" max="100" placeholder="To" value="${p.max_age ?? ""}" style="width:90px"></div>
       <b>Key benefits</b><div><textarea name="benefits" rows="3">${esc((p.key_benefits || []).join("\n"))}</textarea><div class="note">One per line. Staff see these on each recommendation.</div></div>
       <b>Active</b><label><input type="checkbox" name="active" ${p.is_active ? "checked" : ""}> Recommend this product</label>
@@ -481,7 +628,8 @@ $("#dlgSave").onclick = async e => {
   const f = $("#dlgForm"), all = n => [...f.querySelectorAll(`input[name="${n}"]:checked`)].map(i => i.value), num = n => f.querySelector(`[name="${n}"]`).value;
   const body = {category: f.querySelector('[name="category"]').value, suitable_skin_types: all("skin"), target_concerns: all("concern"),
     avoid_for: all("avoid"), min_age: num("min_age") ? +num("min_age") : null, max_age: num("max_age") ? +num("max_age") : null,
-    key_benefits: f.querySelector('[name="benefits"]').value.split("\n"), is_active: f.querySelector('[name="active"]').checked};
+    key_benefits: f.querySelector('[name="benefits"]').value.split("\n"), is_active: f.querySelector('[name="active"]').checked,
+    expiry_date: f.querySelector('[name="expiry"]').value || null};
   try {
     const r = await api("/products/" + encodeURIComponent(DETAIL.product.sku) + "/attributes", {method:"PUT", body: JSON.stringify(body)});
     if (r.warning) { $("#dlgErr").textContent = r.warning; } else { $("#dlg").close(); }

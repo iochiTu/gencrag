@@ -1,145 +1,178 @@
-# K-Beauty Product Recommender (starter)
+# Gen C Beauty Product Assistant
 
-Staff-facing recommender: customer skin profile + budget in, 3–5 ranked products with reasons out.
-No model training. Your PostgreSQL holds products, ingredients, margin and priority; an LLM only
-reranks and explains a shortlist that already passed your safety, stock and budget rules.
-Everything is English: product names, INCI ingredient names, notes and the generated reasons.
-Prices are stored in one currency, set with `CURRENCY` in `.env` (default USD).
+A chat assistant for sales staff (phone, iPad, desktop). Staff describe a customer in plain English and
+get products to offer, best match first with a few choices per routine step, or ask questions about a
+product. No model training: your PostgreSQL holds the products; the AI only picks and explains from a
+shortlist that already passed the safety, stock, expiry and budget rules.
+
+| Page | Who | What |
+| --- | --- | --- |
+| `/` | Staff (own login) | Chat assistant, installable on iOS/Android home screens |
+| `/admin` | Managers (`ADMIN_PASSWORD`) | Ranking strategy, Excel product import, products & campaigns, staff accounts, analytics |
+| `/docs` | Developers | API documentation |
 
 ```
-employee note / form
-   -> parse (keywords + LLM)            app/parsing.py
-   -> SQL hard filters + pgvector search app/db.py
-   -> business score (fit, margin, priority, campaign)   app/scoring.py
-   -> LLM rerank + reasons, validated   app/recommender.py
-   -> response + recommendation_log
+staff message ─> chat (app/chat.py): remembers the customer, follow-ups, product questions
+                  └─> parse (keywords + AI)            app/parsing.py
+                  └─> SQL filters + vector search      app/db.py        stock, budget, skin type, allergens, expiry
+                  └─> business score                   app/scoring.py   fit, margin, priority, campaigns (admin sliders)
+                  └─> AI picks + reasons, validated    app/recommender.py
+                  └─> analytics_events + recommendation_log
 ```
 
-| Mode | Chat model | Embeddings | Use for |
+| `LLM_PROVIDER` | Chat model | Embeddings | Use for |
 | --- | --- | --- | --- |
-| `LLM_PROVIDER=ollama` | `qwen3.5:9b` (local) | `bge-m3` (local, 1024-d) | Local testing, no cloud |
-| `LLM_PROVIDER=bedrock` | Claude Sonnet 5 / Haiku 4.5, or Qwen3 / DeepSeek V3.2 | Cohere Embed v4 (1024-d) | Production |
-| `LLM_PROVIDER=mock` | none (rule-based fallback) | hash vectors | CI, DB testing |
+| `ollama` | `qwen3.5:9b` (local) | `bge-m3` (local, 1024-d) | Local testing, no cloud |
+| `bedrock` | Claude Sonnet 5 / Haiku 4.5, Qwen3, DeepSeek V3.2 | Cohere Embed v4 (1024-d) | Production on AWS |
+| `foundry` | Your Microsoft Foundry deployments (GPT-4.1/5, DeepSeek, Llama, Grok, ...) | e.g. `text-embedding-3-large` at 1024-d | Production on Azure |
+| `mock` | none (rule-based) | hash vectors | Tests |
 
 ## 1. Local test on Windows (Ollama + Qwen 3.5 9B)
 
 Requirements: Python 3.11+, Docker Desktop, [Ollama for Windows](https://ollama.com/download).
-`qwen3.5:9b` is about 6.6 GB: runs well on a GPU with 8 GB+ VRAM, or on CPU with 16 GB RAM (slower,
-roughly 20–60 s per recommendation).
+`qwen3.5:9b` is about 6.6 GB: runs well on a GPU with 8 GB+ VRAM, or on CPU with 16 GB RAM (slower).
 
 ```powershell
 cd C:\RAG\kbeauty-recommender
-
-# 1) Local models
 ollama pull qwen3.5:9b
 ollama pull bge-m3
-
-# 2) PostgreSQL 16 + pgvector in Docker
-docker compose up -d
-
-# 3) Python environment
+docker compose up -d                              # PostgreSQL 16 + pgvector
 py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env      # then set ADMIN_PASSWORD and SECRET_KEY
-
-# 4) Create tables, load the fictional sample catalog, embed products
-python -m app.ingest --init --seed --embed
-
-# 5) Run
-uvicorn app.main:app --port 8000
+copy .env.example .env                            # then set ADMIN_PASSWORD and SECRET_KEY
+python -m app.ingest --init --seed --embed        # tables + fictional sample catalog
+python -m app.users add mina "Mina Park"          # first staff login (asks for a password)
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Open http://localhost:8000 . Try the note: `Dry, flaky skin with some redness. She is pregnant. Under $30.`
-Tick "Show scores (managers)" to see the score breakdown (margin, priority, fit).
+Open http://localhost:8000 (chat) and http://localhost:8000/admin (managers).
+Upgrading an existing database: run `python -m app.ingest --init` once (adds new tables and columns,
+keeps your data). Never run `--seed` on real data: it wipes the product tables.
 
-Checks: http://localhost:8000/health shows the provider, models and how many products are embedded.
-Admin portal: http://localhost:8000/admin  (section 4)
-API docs: http://localhost:8000/docs
+## 2. The chat app (staff)
 
-If you have less GPU memory, set `OLLAMA_CHAT_MODEL=qwen3.5:4b` in `.env` (and `OLLAMA_PARSE_MODEL`).
+- **Sign in** with the account a manager created (Admin > Staff accounts, or `python -m app.users add`).
+  First sign-in asks for a new password. Phones stay signed in for `STAFF_SESSION_DAYS` (30).
+- **Describe the customer**: "Combination skin, breakouts and redness, 24, under $30". The answer shows
+  routine steps; each step has up to 3 choices (best match first) with reasons, benefits, key
+  ingredients and warnings ("ingredient list not on file", "expires in 20 days", "only 2 left").
+- **Refine** in follow-up messages or tap a suggestion: "cheaper options", "she is pregnant",
+  "she's not pregnant", "only serums", "full routine", "more choices", "no budget limit".
+- **Ask about products**: "Is the Retinol Repair Serum OK during pregnancy?", "What's the difference
+  between the Cica Repair Ampoule and the Spot Serum?" Answers use only the product data on file.
+- **New customer** clears what the chat remembered. Past chats are listed in the menu.
+- **Customer bought this** on a card records the sale for analytics.
 
-## 2. Use your own database
+Design follows gencbeauty.com: white pages, navy (#0F0F2D) bars, uppercase Nunito buttons, Cabin text,
+pill search-style input, green prices. Logo from `BRAND_LOGO_URL` (falls back to a text wordmark).
 
-- Point `DATABASE_URL` at your PostgreSQL and run `python -m app.ingest --init` (creates the tables
-  if they don't exist; needs the `vector` extension: `CREATE EXTENSION vector;`).
-- Easiest: import products from Excel in the admin portal (section 5). Or fill `products`, `product_attributes`, `ingredients`, `product_ingredients`, `business_rules`,
-  `skin_concern_map` from your ERP / PIM (a nightly SQL job or ETL). If your tables already exist,
-  create SQL **views** with these names and columns instead of copying data.
-- **Don't** run `--seed` on a real database: it wipes the product tables.
-- Run `python -m app.ingest --embed` after adding products (only new / un-embedded rows are sent).
+**Install on phones and iPads** (needs HTTPS, see section 9):
+iPhone/iPad: open the site in Safari > Share > *Add to Home Screen*.
+Android: open in Chrome > menu > *Install app* (or *Add to Home screen*).
+It then opens full screen like an app. Layout: phones get a slide-out menu and swipeable product
+choices; iPad landscape and desktops get a sidebar with chat history.
 
-## 3. Switch to Amazon Bedrock (production)
-
-```powershell
-aws configure                       # or an IAM role when deployed in AWS
-aws bedrock list-inference-profiles --region ap-northeast-2   # find exact model / profile ids
-```
-In `.env`: `LLM_PROVIDER=bedrock`, set `BEDROCK_*` ids, then
-`python -m app.ingest --reembed` (vectors from different embedding models are not comparable).
-Keep `EMBED_DIM=1024` so the same table works for bge-m3 and Cohere Embed v4.
-
-## 4. Admin portal (http://localhost:8000/admin)
-
-Set `ADMIN_PASSWORD` and `SECRET_KEY` in `.env`, restart, and sign in with your name + that password.
-Every change is written to the change log with the name and time.
+## 3. Admin portal (managers, `/admin`)
 
 | Tab | What managers can do |
 | --- | --- |
-| Ranking strategy | Pick a preset (Customer first, Balanced, Profit focus, Push priority products) or move two sliders: **Customer fit vs. Business value** (max 70% business) and **Profit margin vs. Product priority**. Choices per step (1-4). Optional guard: minimum skin match. Turn the AI step on/off. **Preview** a test customer under the saved vs. new strategy before saving. Changes apply to the next recommendation, no restart. |
-| Import products | Upload an Excel or CSV file, check what will change, import. See section 5. |
-| Products & campaigns | Per product: priority 1-5, campaign boost with start/end dates, hide. Click a product to see what the AI read from its description and correct it. Filter "Only products to check". |
-| Activity & feedback | Recommendations, staff using it, feedback rate, sold and "not suitable" rates, average margin of recommended products vs. catalog, top products, recent recommendations, change log. |
+| Ranking strategy | Presets or two sliders: **customer fit vs. business value** (max 70% business) and **profit margin vs. product priority**. Choices per step (1-4). Minimum skin match. AI on/off. Hide products expiring within N days. Products without an ingredient list: hide from customers who must avoid something (default) or show with a warning. Preview a test customer before saving. |
+| Import products | Upload Excel/CSV, check what will change, import (section 4). |
+| Products & campaigns | Priority 1-5, campaign boosts with dates, hide. Click a product to see and correct what the AI read (category, skin types, concerns, avoid, ages, expiry, benefits). Filter "only products to check". Retry making products searchable if the model was down. |
+| Staff accounts | Add accounts (temporary password shown once), reset passwords (signs out everywhere), disable/enable. Shows last sign-in and usage. |
+| Activity & analytics | Chat analytics (section 6), recommendations & feedback, most recommended products, change log. |
 
-Upgrading an existing database from an earlier version: run `python -m app.ingest --init` once
-(adds the new tables and columns; existing data is kept).
+Every change is logged with the manager's name and time. Put the service behind HTTPS in production.
 
-For production, put the service behind HTTPS (the login cookie is sent on every request).
+## 4. Updating products from Excel (operations staff)
 
-## 5. Updating products from Excel (for operations staff)
+1. **Fill the sheet.** Only **SKU** is required as a column. A new product needs **SKU, Name, Price**
+   (a Description is strongly advised). Optional: Cost (for margin), Stock, Brand, Category, Active,
+   **Expiry**, **Ingredients**. Column names can vary ("Product Code", "Retail Price", "Details", "Best
+   before", "INCI" all work). *Download Excel template* gives a sheet with instructions;
+   `samples/sample_products.xlsx` is an example.
+2. **Write good descriptions**: what it does, who it is for (skin types, age), who should avoid it, and the
+   ingredient list after `Ingredients:` (or in an Ingredients column).
+3. **Check the file**: new / changed / unchanged products, problems by Excel row number, and active
+   products missing from the file, before anything is saved.
+4. **Import**: the AI reads only new or changed descriptions. Progress is shown.
+5. **Review** products marked **check** and correct them if needed.
 
-Admin portal > **Import products**. No technical knowledge needed.
+### Missing or messy data is fine
 
-1. **Fill the sheet.** Required columns: **SKU, Name, Price, Description**. Optional: Cost (needed for
-   margin; without it margin counts as average), Stock (empty = always available), Brand, Category, Active
-   (yes/no). Column names can vary ("Product Code", "Retail Price", "Details" also work).
-   Click *Download Excel template* for a ready sheet with instructions, or see `samples/sample_products.xlsx`.
-2. **Write good descriptions.** The AI reads them. Include what the product does, who it is for (skin types,
-   age such as "ages 25-45", "40+", "teens"), who should avoid it ("not recommended during pregnancy",
-   "not for sensitive skin"), and the full ingredient list after `Ingredients:`.
-3. **Check the file.** Before anything is saved you see new / changed / unchanged products, rows with
-   errors (with their Excel row number) and products in the database that are missing from the file.
-4. **Import.** Products are saved, the AI reads only new or changed descriptions, and the products become
-   searchable. Rows with the same SKU update the existing product.
-5. **Review.** Products marked **check** need a look (e.g. no ingredient list, unclear category).
-   Click a product to see the description, ingredients with their safety flags, and what the recommender
-   uses; correct anything and Save.
+| In the file | What happens |
+| --- | --- |
+| Empty cell, `N/A`, `-`, `TBD`, `#N/A`, `#VALUE!` | Treated as "not given". For an existing product the current value is kept. |
+| Bad optional value (cost "abc", stock "lots", unreadable date) | Warning, value ignored, the row is still imported. |
+| New product without name or price | That row is skipped with an explanation; the rest is imported. |
+| No description | Imported, the AI reads only the name, marked *check*. |
+| No ingredient list | Imported, marked *check*. Safety flags are also read from the description text ("with 0.3% retinol"; "fragrance-free" does not count). By default hidden from customers who must avoid an ingredient; setting in Ranking strategy. |
+| No expiry date | Treated as not expiring. Expired products, and (setting) those expiring within 30 days, are never recommended. |
+| Dates | Excel date cells, `2027-06-30`, `20270630`, `06/2027`, `Mar 2027`, `31/03/2027` are read exactly. Ambiguous `03/04/2027` follows `DATE_ORDER` (MDY default) and shows a warning. Month-only = end of that month. |
+| A file with only SKU + Price (or SKU + Stock) | Updates just those values. |
+| Notes or totals rows without SKU/name | Ignored. Duplicate SKUs: the second row is skipped. |
+| AI model down during import | Products are saved using rules only; *Retry now* in Products makes them searchable later. |
 
-What is decided by rules, not the AI: ingredient safety flags (fragrance, retinoids, AHA, BHA, alcohol,
-essential oils) come from the ingredient list; retinoids always mean "avoid in pregnancy"; products
-with strong actives are not marked safe for sensitive skin unless the description says so. The AI can
-add a restriction but never remove one.
+Ingredient safety flags (fragrance, retinoids, AHA, BHA, alcohol, essential oils) are rule-based, never
+left to the AI. Retinoids always mean "avoid in pregnancy". The AI can add a restriction but never remove one.
 
-Speed: with `qwen3.5:9b` on a GPU, expect a few seconds per product (much slower on CPU); only new or
-changed descriptions are read, so later imports are quick.
+## 5. Model providers
 
-## 6. Multiple choices per step
+**Amazon Bedrock**: `LLM_PROVIDER=bedrock`, `aws configure` (or an IAM role), set `BEDROCK_*` ids
+(`aws bedrock list-inference-profiles --region ap-northeast-2`).
 
-Each routine step (cleanser, toner, serum, ...) shows up to N products (Ranking strategy > *Choices per
-step*, default 3; staff can change it per request). The best match comes first; other options are only
-offered when they score at least 60% of the best one, so staff are not shown weak fillers. Staff can
-click *Customer bought this* on the option that sold; Activity counts sales per product.
+**Microsoft Foundry**: `LLM_PROVIDER=foundry` and in `.env`:
+```
+FOUNDRY_ENDPOINT=https://<your-resource>.openai.azure.com/openai/v1/
+FOUNDRY_AUTH=key                      # or entra (az login / managed identity; pip install azure-identity)
+FOUNDRY_API_KEY=...
+FOUNDRY_CHAT_DEPLOYMENT=gpt-4.1-mini  # deployment NAME from the Foundry portal (case-sensitive)
+FOUNDRY_PARSE_DEPLOYMENT=             # optional cheaper deployment for reading notes/descriptions
+FOUNDRY_EMBED_DEPLOYMENT=text-embedding-3-large
+```
+Works with models on Foundry's OpenAI-compatible endpoint (GPT, DeepSeek, Llama, Grok, ...). Models that
+reject JSON mode or temperature are retried automatically; rate limits (429) are retried with back-off.
+Embeddings are requested at `EMBED_DIM` (1024); a model with a fixed different size is reported clearly.
 
-## 7. Safety rules built in
+After switching provider or embedding model: `python -m app.ingest --reembed`.
 
-- Out of stock, inactive, over budget, wrong skin type, or containing an ingredient the customer
-  must avoid (pregnancy also excludes retinoids) -> never shown, whatever the margin.
-- The LLM can add restrictions while parsing but never remove one; budgets come from the regex parser.
-- Any SKU the LLM returns that is not on the shortlist is dropped; prices come from the database.
-- Medical wording ("treats", "cures", "heals") is rewritten.
-- If the model is down or returns bad JSON, a deterministic routine is returned (`used_llm: false`).
+## 6. Analytics
 
-## 8. Tests
+Every chat message, recommendation, product question, sale, feedback and sign-in is written to
+`analytics_events` (who, when, what was asked, the customer profile, products shown, result, response
+time, whether the AI or the rules answered). Logging never blocks the chat.
+
+Admin > Activity & analytics shows: messages, conversations, active staff, recommendations, product
+questions, no-result rate, response time (average and 90th percentile), AI share, sales; chats per day;
+usage per staff member; what staff asked for; top skin concerns and skin types; most asked-about
+products; **searches with no suitable product** (catalog gaps); errors. **Export CSV** downloads the
+raw events (UTF-8, opens in Excel) for Power BI or other tools. `recommendation_log` keeps every
+recommendation with its candidates and feedback; `chat_messages` keeps the full conversations.
+
+## 7. Tuning
+
+Ranking strategy in the admin portal. Priority (1-5) and campaign boosts per product. Feedback and sales
+from staff appear in Activity.
+
+## 8. Safety rules built in
+
+- Out of stock, inactive, hidden, expired (or expiring soon), over budget, wrong skin type, or containing
+  an ingredient the customer must avoid -> never shown, whatever the margin.
+- The AI can add restrictions while parsing but never remove one; budgets come from the rule parser.
+- Any SKU the AI returns that is not on the shortlist is dropped; prices come from the database.
+- Medical wording ("treats", "cures", "heals") is rewritten. Product answers use only data on file.
+- If the model is down or returns bad output, staff still get a rule-based answer.
+
+## 9. Running for phones (network and HTTPS)
+
+`uvicorn app.main:app --host 0.0.0.0 --port 8000` makes the app reachable on your network
+(http://<pc-ip>:8000). Browsers only allow *install to home screen* and secure cookies over **HTTPS**, so
+for real use put it behind HTTPS: a reverse proxy (Caddy, nginx, IIS) with a certificate, or a cloud host
+(Azure App Service / Container Apps, AWS App Runner / ECS). Sessions use HTTP-only cookies and are marked
+secure automatically behind HTTPS.
+
+## 10. Tests
 
 ```powershell
 pytest -q                                                      # unit tests, no DB needed

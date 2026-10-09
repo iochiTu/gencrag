@@ -35,7 +35,8 @@ SELECT p.sku, p.name, p.brand, p.category, p.routine_step,
              AND (br.valid_to   IS NULL OR br.valid_to   >= current_date)
             THEN br.campaign_boost::float ELSE 0 END AS campaign_boost,
        a.suitable_skin_types, a.target_concerns, a.fragrance_free,
-       a.min_age, a.max_age, a.key_benefits,
+       a.min_age, a.max_age, a.key_benefits, p.expiry_date,
+       ing.inci IS NOT NULL AS ingredients_known,
        COALESCE(ing.inci, '{}') AS key_ingredients,
        1 - (p.embedding <=> %(qvec)s) AS similarity
 FROM products p
@@ -54,6 +55,9 @@ WHERE p.is_active
   AND (%(skin)s::text IS NULL OR %(skin)s::text = ANY(a.suitable_skin_types))
   AND (NOT %(sensitive)s OR 'sensitive' = ANY(a.suitable_skin_types))
   AND NOT (a.avoid_for && %(avoid)s::text[])
+  AND NOT (COALESCE(a.text_flags, '{}') && %(avoid)s::text[])
+  AND (p.expiry_date IS NULL OR p.expiry_date >= current_date + %(min_shelf)s::int)
+  AND (NOT %(hide_unknown)s OR cardinality(%(avoid)s::text[]) = 0 OR ing.inci IS NOT NULL)
   AND NOT EXISTS (
         SELECT 1 FROM product_ingredients pi2 JOIN ingredients i2 ON i2.id = pi2.ingredient_id
         WHERE pi2.sku = p.sku AND i2.flags && %(avoid)s::text[])
@@ -63,8 +67,11 @@ LIMIT %(k)s
 """
 
 
-def fetch_candidates(conn, *, qvec, skin, sensitive, avoid, cats, pmin, pmax, k) -> list[dict[str, Any]]:
-    """Hard filters (stock, price, skin type, contraindications) + vector similarity, in one query."""
+def fetch_candidates(conn, *, qvec, skin, sensitive, avoid, cats, pmin, pmax, k,
+                     min_shelf: int = 0, hide_unknown: bool = True) -> list[dict[str, Any]]:
+    """Hard filters (stock, price, skin type, contraindications, expiry) + vector similarity, in one query.
+    Missing data is handled safely: no expiry date = not tracked; no ingredient list = hidden from customers
+    who must avoid something (unless the manager chose to show it with a warning)."""
     params = dict(
         qvec=np.asarray(qvec, dtype=np.float32),
         skin=skin,
@@ -74,6 +81,8 @@ def fetch_candidates(conn, *, qvec, skin, sensitive, avoid, cats, pmin, pmax, k)
         pmin=float(pmin),
         pmax=float(pmax),
         k=int(k),
+        min_shelf=int(min_shelf),
+        hide_unknown=bool(hide_unknown),
     )
     return list(conn.execute(CANDIDATE_SQL, params).fetchall())
 

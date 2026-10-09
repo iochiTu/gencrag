@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import date
 
 from .config import settings
 from .db import fetch_candidates, log_recommendation
@@ -76,7 +77,8 @@ def _shortlist_for_llm(shortlist: list[dict]) -> str:
         lines.append(json.dumps({k: v for k, v in {
             "n": i, "sku": c["sku"], "name": c["name"], "category": c["category"], "price": c["price"],
             "skin_types": c.get("suitable_skin_types"), "targets": c.get("target_concerns"), "ages": _ages(c),
-            "benefits": (c.get("key_benefits") or [])[:3], "key_ingredients": (c.get("key_ingredients") or [])[:5],
+            "benefits": (c.get("key_benefits") or [])[:3],
+            "key_ingredients": (c.get("key_ingredients") or [])[:5] if c.get("ingredients_known", True) else "not on file",
             "about": _about(c), "business_score": c["business_score"],
         }.items() if v not in (None, [], "")}))
     return "\n".join(lines)
@@ -103,6 +105,22 @@ def template_reason(c: dict, profile: CustomerProfile) -> str:
     return f"{c['category'].title()} for {focus}, with {ing}." if ing else f"{c['category'].title()} for {focus}."
 
 
+def _staff_notes(c: dict, profile: CustomerProfile) -> list[str]:
+    """Short warnings for staff when data is missing or close to a limit."""
+    notes = []
+    if not c.get("ingredients_known", True):
+        notes.append("Ingredient list not on file: check the label" +
+                     (f" for {', '.join(a.replace('_', ' ') for a in profile.avoid)}" if profile.avoid else ""))
+    exp = c.get("expiry_date")
+    if exp:
+        days = (exp - date.today()).days
+        if days <= 90:
+            notes.append(f"Expires {exp.isoformat()} ({days} days)")
+    if c.get("stock_qty") is not None and c["stock_qty"] <= 3:
+        notes.append(f"Only {c['stock_qty']} left in stock")
+    return notes
+
+
 def _with_reason(c: dict, reason: str | None, profile: CustomerProfile) -> dict:
     return {**c, "reason": sanitize(reason or "") or template_reason(c, profile)}
 
@@ -111,7 +129,8 @@ def llm_rerank(provider: Provider, profile: CustomerProfile, shortlist: list[dic
                use_llm: bool = True):
     """Returns (steps, routine_tip, used_llm). Each step = {category, routine_step, options:[product + reason]}.
     Anything the model returns that is not on the shortlist is dropped; gaps are filled deterministically."""
-    base = build_steps(shortlist, steps, options)
+    # asked for one category ("only serums"): staff want a real choice, so accept slightly weaker alternatives
+    base = build_steps(shortlist, steps, options, min_ratio=0.4 if len(profile.categories) == 1 else 0.6)
     if use_llm:
         by_sku = {c["sku"]: c for c in shortlist}
         system = RANK_SYSTEM.format(steps=steps, options=options)
@@ -171,7 +190,7 @@ def build_profile(provider: Provider, req: RecommendRequest, use_llm: bool) -> C
     return profile
 
 
-def retrieve(conn, provider: Provider, profile: CustomerProfile) -> list[dict]:
+def retrieve(conn, provider: Provider, profile: CustomerProfile, ranking: RankingSettings | None = None) -> list[dict]:
     """SQL hard filters + vector search. Independent of the ranking strategy."""
     helpful = concern_ingredients(conn, profile.concerns)
     qvec = provider.embed([build_query_text(profile, helpful)], kind="query")[0]
@@ -181,6 +200,8 @@ def retrieve(conn, provider: Provider, profile: CustomerProfile) -> list[dict]:
         conn, qvec=qvec, skin=profile.skin_type, sensitive=profile.sensitive,
         avoid=profile.avoid_flags(), cats=profile.categories,
         pmin=profile.budget_min or 0, pmax=profile.budget_max or NO_LIMIT, k=settings.retrieve_k,
+        min_shelf=(ranking or RankingSettings()).min_days_before_expiry,
+        hide_unknown=(ranking or RankingSettings()).unknown_ingredients == "hide",
     )
 
 
@@ -196,7 +217,7 @@ def recommend(conn, provider: Provider, req: RecommendRequest) -> dict:
     t0 = time.perf_counter()
     ranking = load_ranking(conn)
     profile = build_profile(provider, req, use_llm=ranking.use_llm_rerank)
-    scored = rank(retrieve(conn, provider, profile), profile, ranking)
+    scored = rank(retrieve(conn, provider, profile, ranking), profile, ranking)
     shortlist = scored[: settings.shortlist_size]
 
     if not shortlist:
@@ -216,6 +237,7 @@ def recommend(conn, provider: Provider, req: RecommendRequest) -> dict:
             "key_ingredients": (c.get("key_ingredients") or [])[:5],
             "key_benefits": [b for b in (c.get("key_benefits") or []) if b not in c["reason"]][:3],
             "ages": _ages(c), "option": rank_in_step, "reason": c["reason"],
+            "notes": _staff_notes(c, profile),
             **({"debug": {k: c[k] for k in ("score", "skin_fit", "similarity", "margin_norm", "priority_norm",
                                              "campaign_boost", "margin_pct")}} if req.debug else {}),
         }
@@ -243,10 +265,13 @@ def recommend(conn, provider: Provider, req: RecommendRequest) -> dict:
 def preview(conn, provider: Provider, req: RecommendRequest, current: RankingSettings, proposed: RankingSettings) -> dict:
     """Admin preview: the same customer ranked under two strategies. No LLM, nothing logged."""
     profile = build_profile(provider, req, use_llm=False)
-    cands = retrieve(conn, provider, profile)
+    same_filters = (current.min_days_before_expiry, current.unknown_ingredients) == \
+                   (proposed.min_days_before_expiry, proposed.unknown_ingredients)
+    cands_cur = retrieve(conn, provider, profile, current)
+    cands_new = cands_cur if same_filters else retrieve(conn, provider, profile, proposed)
 
     def view(r: RankingSettings) -> dict:
-        scored = rank(cands, profile, r)
+        scored = rank(cands_cur if r is current else cands_new, profile, r)
         plan = build_steps(scored[: settings.shortlist_size], req.top_n, req.options or r.options_per_step)
         picks = {c["sku"]: ("first" if i == 0 else "alt") for s in plan for i, c in enumerate(s["options"])}
         return {"weights": r.describe(), "rows": [{

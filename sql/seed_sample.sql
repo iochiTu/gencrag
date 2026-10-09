@@ -2,7 +2,8 @@
 -- (or point DATABASE_URL at your existing database and map your tables to this schema).
 
 TRUNCATE recommendation_log, business_rules, product_ingredients, product_attributes,
-         products, ingredients, skin_concern_map, app_settings, admin_audit, import_jobs RESTART IDENTITY CASCADE;
+         products, ingredients, skin_concern_map, app_settings, admin_audit, import_jobs,
+         chat_messages, chat_conversations, analytics_events RESTART IDENTITY CASCADE;
 
 INSERT INTO skin_concern_map (concern, label, helpful_ingredients) VALUES
  ('acne',         'Breakouts',         '{Salicylic Acid,Centella Asiatica Extract,Houttuynia Cordata Extract,Zinc PCA,Tea Tree Leaf Oil}'),

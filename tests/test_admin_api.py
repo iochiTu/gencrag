@@ -16,7 +16,10 @@ def client():
     with db.connect() as c:
         c.execute("DELETE FROM app_settings"); c.execute("DELETE FROM admin_audit")
     ingest.embed_products(reembed=True)
-    return TestClient(app)
+    c = TestClient(app)
+    from tests.conftest import staff_login
+    staff_login(c)
+    return c
 
 
 def login(client):
@@ -25,9 +28,12 @@ def login(client):
 
 
 def test_requires_login(client):
+    from tests.conftest import staff_login
     client.cookies.clear()
+    assert client.post("/recommend", json={"text": "dry skin"}).status_code == 401
     assert client.get("/admin/api/ranking").status_code == 401
     assert client.post("/admin/api/login", json={"name": "x", "password": "wrong"}).status_code == 401
+    staff_login(client)
 
 
 def test_ranking_save_applies_to_staff_recommendations(client):

@@ -144,3 +144,69 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     error       TEXT,
     finished_at TIMESTAMPTZ
 );
+
+-- v0.4: fault-tolerant import (safe to re-run)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS expiry_date DATE;              -- NULL = not tracked
+ALTER TABLE product_attributes ADD COLUMN IF NOT EXISTS text_flags TEXT[] NOT NULL DEFAULT '{}';
+    -- safety flags found in the description text ("with 0.3% retinol"), used when no ingredient list exists
+
+-- v0.5: staff accounts, chat, analytics (safe to re-run)
+CREATE TABLE IF NOT EXISTS staff_users (
+    id                   BIGSERIAL PRIMARY KEY,
+    username             TEXT UNIQUE NOT NULL,                  -- lower-case login name
+    display_name         TEXT NOT NULL,
+    password_hash        TEXT NOT NULL,                         -- pbkdf2_sha256
+    role                 TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('staff', 'manager')),
+    is_active            BOOLEAN NOT NULL DEFAULT TRUE,
+    must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
+    session_version      INTEGER NOT NULL DEFAULT 1,             -- bump to sign the user out everywhere
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by           TEXT,
+    last_login_at        TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS chat_conversations (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES staff_users(id) ON DELETE CASCADE,
+    title      TEXT NOT NULL DEFAULT 'New chat',
+    profile    JSONB NOT NULL DEFAULT '{}',        -- what the chat has learned about the customer so far
+    state      JSONB NOT NULL DEFAULT '{}',        -- last prices shown, choices per step, ...
+    archived   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chat_conversations_user ON chat_conversations (user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id              BIGSERIAL PRIMARY KEY,
+    conversation_id BIGINT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content         TEXT NOT NULL,
+    payload         JSONB,                          -- recommendation steps, product cards, suggestions
+    log_id          BIGINT,                         -- recommendation_log row, for feedback
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chat_messages_conv ON chat_messages (conversation_id, id);
+
+-- One row per thing that happened, for analytics and BI export (never blocks the app if it fails)
+CREATE TABLE IF NOT EXISTS analytics_events (
+    id              BIGSERIAL PRIMARY KEY,
+    at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    event           TEXT NOT NULL,      -- login | chat | recommendation | product_question | clarify | feedback | error
+    user_id         BIGINT,
+    username        TEXT,
+    conversation_id BIGINT,
+    intent          TEXT,
+    message         TEXT,
+    profile         JSONB,
+    skus            TEXT[],
+    result_count    INTEGER,
+    status          TEXT,               -- ok | no_match | error
+    latency_ms      INTEGER,
+    used_llm        BOOLEAN,
+    model           TEXT,
+    log_id          BIGINT,
+    meta            JSONB
+);
+CREATE INDEX IF NOT EXISTS analytics_events_at ON analytics_events (at);
+CREATE INDEX IF NOT EXISTS analytics_events_event_at ON analytics_events (event, at);

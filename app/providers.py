@@ -1,6 +1,8 @@
-"""LLM + embedding providers. Switch with LLM_PROVIDER = ollama | bedrock | mock.
+"""LLM + embedding providers. Switch with LLM_PROVIDER = ollama | bedrock | foundry | mock.
 
 - ollama : local testing (e.g. qwen3.5:9b for chat, bge-m3 for embeddings)
+- foundry: production on Microsoft Foundry (Azure), OpenAI-compatible v1 endpoint: GPT, DeepSeek, Llama, Grok ...
+           deployments; API key or Microsoft Entra ID
 - bedrock: production on Amazon Bedrock (Claude / Qwen / DeepSeek via the Converse API,
            Cohere Embed v4 or Titan V2 for embeddings)
 - mock   : no model at all; deterministic hash embeddings, chat returns nothing so the
@@ -12,6 +14,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from typing import Literal, Protocol
 
 import httpx
@@ -138,6 +141,111 @@ class BedrockProvider:
         return "".join(p.get("text", "") for p in parts)
 
 
+# --------------------------------------------------------------------------- Microsoft Foundry
+def foundry_base(endpoint: str) -> str:
+    """Accepts what people paste from the portal and returns https://<host>/openai/v1"""
+    e = (endpoint or "").strip().rstrip("/")
+    if not e:
+        raise ProviderError("FOUNDRY_ENDPOINT is empty. Copy it from the Foundry portal (Models + endpoints).")
+    e = e.split("?")[0]
+    if "/openai" in e:
+        e = e[: e.index("/openai")]
+    for suffix in ("/models", "/api/projects"):
+        if suffix in e:
+            e = e[: e.index(suffix)]
+    return e + "/openai/v1"
+
+
+class FoundryProvider:
+    name = "foundry"
+
+    def __init__(self, client: httpx.Client | None = None, sleep=time.sleep):
+        self.base = foundry_base(settings.foundry_endpoint)
+        self.client = client or httpx.Client(timeout=settings.foundry_timeout_s)
+        self.sleep = sleep
+        self._token, self._token_exp = None, 0.0
+        self._send_dimensions = True
+        self._plain_chat: set[str] = set()          # deployments that reject JSON mode / temperature
+
+    def model_label(self, role: Role) -> str:
+        return settings.foundry_parse_deployment if role == "parse" else settings.foundry_chat_deployment
+
+    def _headers(self) -> dict:
+        if settings.foundry_auth == "entra":
+            if not self._token or time.time() > self._token_exp - 300:
+                try:
+                    from azure.identity import DefaultAzureCredential
+                except ImportError as e:
+                    raise ProviderError("FOUNDRY_AUTH=entra needs: pip install azure-identity") from e
+                tok = DefaultAzureCredential().get_token("https://ai.azure.com/.default")
+                self._token, self._token_exp = tok.token, float(tok.expires_on)
+            return {"Authorization": f"Bearer {self._token}"}
+        if not settings.foundry_api_key:
+            raise ProviderError("FOUNDRY_API_KEY is empty. Copy a key from the Foundry portal, or set FOUNDRY_AUTH=entra.")
+        return {"api-key": settings.foundry_api_key}
+
+    def _post(self, path: str, body: dict, deployment: str) -> httpx.Response:
+        for attempt in range(4):
+            try:
+                r = self.client.post(self.base + path, json=body, headers=self._headers())
+            except httpx.ConnectError as e:
+                raise ProviderError(f"Cannot reach Microsoft Foundry at {self.base}. Check FOUNDRY_ENDPOINT and the network.") from e
+            except httpx.TimeoutException as e:
+                raise ProviderError(f"Microsoft Foundry timed out after {settings.foundry_timeout_s}s.") from e
+            if (r.status_code == 429 or r.status_code >= 500) and attempt < 3:
+                wait = r.headers.get("retry-after-ms") or r.headers.get("retry-after")
+                try:
+                    secs = float(wait) / (1000 if "retry-after-ms" in r.headers else 1)
+                except (TypeError, ValueError):
+                    secs = 2 ** attempt
+                self.sleep(min(max(secs, 0.5), 20))          # rate limit or temporary error: wait and retry
+                continue
+            break
+        if r.status_code in (401, 403):
+            raise ProviderError("Microsoft Foundry rejected the credentials (" + str(r.status_code) + "). "
+                                "Check FOUNDRY_API_KEY, or the role assignment if you use Entra ID.")
+        if r.status_code == 404:
+            raise ProviderError(f"Foundry deployment '{deployment}' was not found. Use the deployment name from the "
+                                "Foundry portal (case-sensitive) and check FOUNDRY_ENDPOINT.")
+        if r.status_code == 429:
+            raise ProviderError("Microsoft Foundry rate limit reached; try again shortly or raise the deployment quota.")
+        return r
+
+    def embed(self, texts, kind="document"):
+        dep, out = settings.foundry_embed_deployment, []
+        for i in range(0, len(texts), 16):
+            body = {"model": dep, "input": texts[i:i + 16]}
+            if self._send_dimensions:
+                body["dimensions"] = settings.embed_dim     # text-embedding-3-* can shorten to EMBED_DIM
+            r = self._post("/embeddings", body, dep)
+            if r.status_code == 400 and "dimensions" in body:
+                self._send_dimensions = False               # model has a fixed size; ingest checks EMBED_DIM
+                body.pop("dimensions")
+                r = self._post("/embeddings", body, dep)
+            if r.status_code >= 400:
+                raise ProviderError(f"Foundry embeddings error {r.status_code}: {r.text[:300]}")
+            out.extend(d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"]))
+        return out
+
+    def chat(self, system, user, role="rank"):
+        dep = self.model_label(role)
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        attempts = [{"model": dep, "messages": msgs}] if dep in self._plain_chat else [
+            {"model": dep, "messages": msgs, "temperature": 0.2, "max_tokens": 1500,
+             "response_format": {"type": "json_object"}},
+            {"model": dep, "messages": msgs}]               # reasoning / non-OpenAI models reject some options
+        for i, body in enumerate(attempts):
+            r = self._post("/chat/completions", body, dep)
+            if r.status_code == 400 and i + 1 < len(attempts) and "content_filter" not in r.text:
+                self._plain_chat.add(dep)
+                continue
+            break
+        if r.status_code >= 400:
+            raise ProviderError(f"Foundry chat error {r.status_code}: {r.text[:300]}")
+        msg = r.json()["choices"][0]["message"]
+        return msg.get("content") or ""
+
+
 # --------------------------------------------------------------------------- Mock (no model)
 class MockProvider:
     name = "mock"
@@ -166,13 +274,16 @@ def _hash_embed(text: str, dim: int) -> list[float]:
 def get_provider() -> Provider:
     if settings.provider == "bedrock":
         return BedrockProvider()
+    if settings.provider in ("foundry", "azure"):
+        return FoundryProvider()
     if settings.provider == "mock":
         return MockProvider()
     return OllamaProvider()
 
 
 def embed_model_label() -> str:
-    return {"bedrock": settings.bedrock_embed_model, "mock": "mock-hash"}.get(
+    return {"bedrock": settings.bedrock_embed_model, "mock": "mock-hash",
+            "foundry": settings.foundry_embed_deployment, "azure": settings.foundry_embed_deployment}.get(
         settings.provider, settings.ollama_embed_model)
 
 

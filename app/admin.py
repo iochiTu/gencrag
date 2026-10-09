@@ -161,7 +161,8 @@ SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::floa
        ((p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct, p.stock_qty, p.is_active,
        a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age,
        COALESCE(a.needs_review, a.sku IS NULL) AS needs_review, a.review_note, a.extracted_by,
-       p.embedding IS NOT NULL AS searchable,
+       p.embedding IS NOT NULL AS searchable, p.expiry_date, COALESCE(a.text_flags, '{}') AS text_flags,
+       EXISTS (SELECT 1 FROM product_ingredients pi WHERE pi.sku = p.sku) AS ingredients_known,
        COALESCE(br.priority, 3) AS priority, COALESCE(br.campaign_boost, 0)::float AS campaign_boost,
        br.valid_from, br.valid_to, COALESCE(br.excluded, FALSE) AS excluded,
        (br.campaign_boost > 0 AND (br.valid_from IS NULL OR br.valid_from <= current_date)
@@ -187,7 +188,7 @@ def get_products(_: str = Depends(require_admin)):
     with connect() as conn:
         rows = conn.execute(PRODUCTS_SQL).fetchall()
     for r in rows:
-        for k in ("valid_from", "valid_to", "updated_at"):
+        for k in ("valid_from", "valid_to", "updated_at", "expiry_date"):
             r[k] = r[k].isoformat() if r[k] else None
     return {"products": rows, "currency": settings.currency}
 
@@ -288,7 +289,7 @@ class UploadBody(BaseModel):
 def import_preview(body: UploadBody, name: str = Depends(require_admin)):
     try:
         data = base64.b64decode(body.content_b64)
-        parsed = importer.read_table(body.filename, data)
+        parsed = importer.read_table(body.filename, data, settings.date_order)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -352,7 +353,8 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
             """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost, p.stock_qty,
                       p.is_active, p.description, p.embedding IS NOT NULL AS searchable,
                       a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age, a.texture,
-                      a.fragrance_free, a.key_benefits, a.needs_review, a.review_note, a.extracted_by
+                      a.fragrance_free, a.key_benefits, a.needs_review, a.review_note, a.extracted_by,
+                      p.expiry_date, COALESCE(a.text_flags, '{}') AS text_flags
                FROM products p LEFT JOIN product_attributes a USING (sku) WHERE p.sku = %s""", (sku,)).fetchone()
         if not p:
             raise HTTPException(404, f"Unknown SKU {sku}")
@@ -371,6 +373,7 @@ class Attributes(BaseModel):
     min_age: Optional[int] = Field(None, ge=10, le=100)
     max_age: Optional[int] = Field(None, ge=10, le=100)
     key_benefits: list[str] = []
+    expiry_date: Optional[date] = None
     is_active: bool = True
 
     @model_validator(mode="after")
@@ -399,8 +402,10 @@ def update_attributes(sku: str, body: Attributes, name: str = Depends(require_ad
         importer.save_attributes(conn, sku, {
             **body.model_dump(exclude={"is_active"}), "routine_step": ROUTINE_STEP[body.category],
             "texture": cur.get("texture"), "fragrance_free": cur.get("fragrance_free", False),
-            "needs_review": False, "review_note": None, "extracted_by": "manual"})
-        conn.execute("UPDATE products SET is_active = %s WHERE sku = %s", (body.is_active, sku))
+            "needs_review": False, "review_note": None, "extracted_by": "manual",
+            "text_flags": []})               # the editor shows text flags as pre-ticked avoid boxes; staff decide
+        conn.execute("UPDATE products SET is_active = %s, expiry_date = %s WHERE sku = %s",
+                     (body.is_active, body.expiry_date, sku))
         audit(conn, name, "product", sku, old, body.model_dump())
     warning = None
     try:
@@ -408,3 +413,163 @@ def update_attributes(sku: str, body: Attributes, name: str = Depends(require_ad
     except (ProviderError, EmbedError) as e:
         warning = f"Saved, but the product is not searchable until the model is reachable: {e}"
     return {"ok": True, "warning": warning}
+
+
+@router.post("/embed-missing")
+def embed_missing(_: str = Depends(require_admin)):
+    """Retry making products searchable (e.g. after the model was unreachable during an import)."""
+    try:
+        return {"ok": True, "embedded": embed_products(provider=_provider)}
+    except (ProviderError, EmbedError) as e:
+        raise HTTPException(503, str(e))
+
+
+# ------------------------------------------------------------------ staff accounts (chat app logins)
+from . import auth as staff_auth                          # noqa: E402
+
+
+@router.get("/users")
+def list_users(_: str = Depends(require_admin)):
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.must_change_password, u.last_login_at,
+                      u.created_at, u.created_by,
+                      (SELECT count(*) FROM analytics_events e WHERE e.user_id = u.id AND e.event = 'chat'
+                         AND e.at > now() - interval '30 days') AS chats_30d
+               FROM staff_users u ORDER BY u.is_active DESC, u.display_name""").fetchall()
+    for r in rows:
+        for k in ("last_login_at", "created_at"):
+            r[k] = r[k].isoformat() if r[k] else None
+    return {"users": rows}
+
+
+class NewUser(BaseModel):
+    username: str = Field(..., max_length=40)
+    display_name: str = Field(..., max_length=80)
+    role: str = Field("staff", pattern="^(staff|manager)$")
+    password: Optional[str] = Field(None, max_length=200)
+
+
+@router.post("/users")
+def add_user(body: NewUser, name: str = Depends(require_admin)):
+    pw = body.password or staff_auth.temp_password()
+    if body.password:
+        staff_auth.check_new_password(pw)
+    with connect() as conn:
+        try:
+            u = staff_auth.create_user(conn, body.username, body.display_name, pw, body.role, created_by=name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        audit(conn, name, "user", u["username"], None, {"display_name": u["display_name"], "role": u["role"]})
+    return {"user": {"id": u["id"], "username": u["username"]}, "temporary_password": pw}
+
+
+class UserUpdate(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=80)
+    role: Optional[str] = Field(None, pattern="^(staff|manager)$")
+    is_active: Optional[bool] = None
+
+
+@router.put("/users/{user_id}")
+def update_user(user_id: int, body: UserUpdate, name: str = Depends(require_admin)):
+    with connect() as conn:
+        old = conn.execute("SELECT username, display_name, role, is_active FROM staff_users WHERE id = %s", (user_id,)).fetchone()
+        if not old:
+            raise HTTPException(404, "User not found")
+        conn.execute(
+            """UPDATE staff_users SET display_name = COALESCE(%s, display_name), role = COALESCE(%s, role),
+                   is_active = COALESCE(%s, is_active),
+                   session_version = session_version + CASE WHEN %s IS FALSE THEN 1 ELSE 0 END
+               WHERE id = %s""", (body.display_name, body.role, body.is_active, body.is_active, user_id))
+        audit(conn, name, "user", old["username"], old, body.model_dump(exclude_none=True))
+    return {"ok": True}
+
+
+@router.post("/users/{user_id}/reset")
+def reset_user_password(user_id: int, name: str = Depends(require_admin)):
+    pw = staff_auth.temp_password()
+    with connect() as conn:
+        u = conn.execute("""UPDATE staff_users SET password_hash = %s, must_change_password = TRUE,
+                                session_version = session_version + 1 WHERE id = %s RETURNING username""",
+                         (staff_auth.hash_password(pw), user_id)).fetchone()
+        if not u:
+            raise HTTPException(404, "User not found")
+        audit(conn, name, "user", u["username"], None, {"password": "reset; signed out everywhere"})
+    return {"temporary_password": pw}
+
+
+# ------------------------------------------------------------------ analytics (chat usage) + CSV export
+@router.get("/analytics")
+def analytics(days: int = 30, _: str = Depends(require_admin)):
+    d = {"d": max(1, min(days, 365))}
+    W = "at > now() - make_interval(days => %(d)s)"
+    with connect() as conn:
+        q = lambda sql: conn.execute(sql, d).fetchall()
+        totals = conn.execute(f"""
+            SELECT count(*) FILTER (WHERE event = 'chat') AS chats,
+                   count(DISTINCT conversation_id) FILTER (WHERE event = 'chat') AS conversations,
+                   count(DISTINCT user_id) FILTER (WHERE event = 'chat') AS active_staff,
+                   count(*) FILTER (WHERE event = 'chat' AND intent = 'recommendation' AND status = 'ok') AS recommendations,
+                   count(*) FILTER (WHERE event = 'chat' AND intent = 'product_question') AS product_questions,
+                   count(*) FILTER (WHERE event = 'chat' AND status = 'no_match') AS no_match,
+                   count(*) FILTER (WHERE event = 'chat' AND status = 'error') AS errors,
+                   round(avg(latency_ms) FILTER (WHERE event = 'chat'))::int AS avg_ms,
+                   (percentile_cont(0.9) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE event = 'chat'))::int AS p90_ms,
+                   count(*) FILTER (WHERE event = 'chat' AND used_llm) AS ai_answers,
+                   count(*) FILTER (WHERE event = 'chat' AND used_llm IS NOT NULL) AS ai_eligible,
+                   count(*) FILTER (WHERE event = 'feedback' AND intent = 'sold') AS sold,
+                   count(*) FILTER (WHERE event = 'feedback') AS feedback,
+                   count(*) FILTER (WHERE event = 'login') AS logins
+            FROM analytics_events WHERE {W}""", d).fetchone()
+        daily = q(f"""SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day,
+                         count(*) FILTER (WHERE event = 'chat') AS chats,
+                         count(*) FILTER (WHERE event = 'chat' AND intent = 'recommendation' AND status = 'ok') AS recommendations,
+                         count(*) FILTER (WHERE event = 'feedback' AND intent = 'sold') AS sold
+                      FROM analytics_events WHERE {W} GROUP BY 1 ORDER BY 1""")
+        staff = q(f"""SELECT username, count(*) FILTER (WHERE event = 'chat') AS chats,
+                         count(*) FILTER (WHERE event = 'chat' AND intent = 'recommendation' AND status = 'ok') AS recommendations,
+                         count(*) FILTER (WHERE event = 'chat' AND intent = 'product_question') AS questions,
+                         count(*) FILTER (WHERE event = 'feedback' AND intent = 'sold') AS sold,
+                         to_char(max(at), 'YYYY-MM-DD HH24:MI') AS last_active
+                      FROM analytics_events WHERE {W} AND username IS NOT NULL GROUP BY 1 ORDER BY chats DESC LIMIT 50""")
+        intents = q(f"SELECT COALESCE(intent, 'other') AS intent, count(*) AS n FROM analytics_events "
+                    f"WHERE {W} AND event = 'chat' GROUP BY 1 ORDER BY n DESC")
+        concerns = q(f"""SELECT c AS concern, count(*) AS n FROM analytics_events, jsonb_array_elements_text(profile->'concerns') c
+                         WHERE {W} AND event = 'chat' AND intent = 'recommendation' GROUP BY 1 ORDER BY n DESC LIMIT 10""")
+        skin = q(f"""SELECT COALESCE(profile->>'skin_type', 'not given') AS skin_type, count(*) AS n FROM analytics_events
+                     WHERE {W} AND event = 'chat' AND intent = 'recommendation' GROUP BY 1 ORDER BY n DESC""")
+        asked = q(f"""SELECT s AS sku, p.name, count(*) AS n FROM analytics_events, unnest(skus) s
+                      LEFT JOIN products p ON p.sku = s
+                      WHERE {W} AND event = 'chat' AND intent = 'product_question' GROUP BY 1, 2 ORDER BY n DESC LIMIT 10""")
+        gaps = q(f"""SELECT to_char(at, 'YYYY-MM-DD HH24:MI') AS at, username, message, profile FROM analytics_events
+                     WHERE {W} AND event = 'chat' AND status = 'no_match' ORDER BY at DESC LIMIT 20""")
+        errors = q(f"""SELECT to_char(at, 'YYYY-MM-DD HH24:MI') AS at, username, message, meta FROM analytics_events
+                       WHERE {W} AND status = 'error' ORDER BY at DESC LIMIT 10""")
+    return {"days": d["d"], "totals": totals, "daily": daily, "staff": staff, "intents": intents, "concerns": concerns,
+            "skin_types": skin, "asked_products": asked, "no_match": gaps, "errors": errors}
+
+
+@router.get("/analytics/export.csv")
+def analytics_export(days: int = 90, _: str = Depends(require_admin)):
+    import csv
+    import io
+    days = max(1, min(days, 730))
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT at, event, username, conversation_id, intent, status, message, profile, skus, result_count,
+                      latency_ms, used_llm, model, log_id
+               FROM analytics_events WHERE at > now() - make_interval(days => %s) ORDER BY at""", (days,)).fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time_utc", "event", "staff", "conversation_id", "intent", "status", "message", "skin_type", "sensitive",
+                "concerns", "avoid", "age", "budget_max", "categories", "products", "result_count", "latency_ms",
+                "used_ai", "model", "recommendation_id"])
+    for r in rows:
+        p = r["profile"] or {}
+        w.writerow([r["at"].isoformat(), r["event"], r["username"], r["conversation_id"], r["intent"], r["status"],
+                    (r["message"] or "").replace("\n", " "), p.get("skin_type"), p.get("sensitive"),
+                    ";".join(p.get("concerns") or []), ";".join(p.get("avoid") or []), p.get("age"), p.get("budget_max"),
+                    ";".join(p.get("categories") or []), ";".join(r["skus"] or []), r["result_count"], r["latency_ms"],
+                    r["used_llm"], r["model"], r["log_id"]])
+    return Response("﻿" + buf.getvalue(), media_type="text/csv",            # BOM so Excel reads UTF-8
+                    headers={"Content-Disposition": f'attachment; filename="recommender-analytics-{days}d.csv"'})
