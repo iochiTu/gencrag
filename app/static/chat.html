@@ -102,7 +102,12 @@
   .bot .text strong { color: var(--ink); }
   .bot.err .text { color: var(--pink); }
   .pchips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
-  .pchips span { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--soft); color: var(--navy-2); border: 1px solid var(--line); }
+  .pchips > span { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; padding: 3px 8px 3px 10px; border-radius: 999px; background: var(--soft); color: var(--navy-2); border: 1px solid var(--line); }
+  .pchips button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 20px; line-height: 1; }
+  .pchips button:hover { background: var(--line); }
+  .pchips button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .pchips button:disabled { opacity: .4; cursor: wait; }
+  .pchips.historical button { display: none; }
   .step { margin: 14px 0 6px; }
   .stephead { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
   .stephead b { font-family: var(--btn); font-weight: 800; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--navy); }
@@ -121,9 +126,6 @@
   .card .ings { font-size: 12px; color: var(--muted); margin-top: 8px; }
   .card .note { font-size: 12px; color: var(--pink); background: var(--pink-bg); border-radius: 4px; padding: 4px 8px; margin-top: 8px; }
   .card .flags { font-size: 12px; margin-top: 6px; color: var(--navy-2); }
-  .card .act { margin-top: auto; padding-top: 10px; }
-  .card .act .btn { width: 100%; }
-  .sold { font-family: var(--btn); font-weight: 800; font-size: 12px; text-transform: uppercase; color: var(--green); text-align: center; padding: 8px 0; }
   .total { font-size: 13px; color: var(--muted); margin-top: 10px; }
   .fb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--muted); }
   .typing span { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); margin-right: 4px; animation: blink 1.2s infinite; }
@@ -315,12 +317,17 @@ async function loadConvs() {
     : `<div class="conv" style="cursor:default;color:var(--muted)"><span>No chats yet</span></div>`;
 }
 $("#convs").onclick = async e => {
+  if (BUSY) return;
   const del = e.target.closest("[data-del]");
   if (del) { e.stopPropagation(); await api(`/api/conversations/${del.dataset.del}`, {method: "DELETE"}); if (+del.dataset.del === CONV) newChat(); loadConvs(); return; }
   const c = e.target.closest(".conv[data-id]"); if (!c) return;
   const d = await api(`/api/conversations/${c.dataset.id}`);
-  CONV = d.conversation.id; $("#msgs").innerHTML = ""; d.messages.forEach(render);
   const last = [...d.messages].reverse().find(m => m.role === "assistant");
+  if (last && d.profile_constraints) {
+    last.payload = {...last.payload, profile_constraints: d.profile_constraints,
+                    profile_chips: d.profile_constraints.map(c => c.label)};
+  }
+  CONV = d.conversation.id; $("#msgs").innerHTML = ""; d.messages.forEach(render);
   chips(last?.payload?.suggestions || []); closeMenu(); loadConvs(); scrollDown();
 };
 const closeMenu = () => $("#app").classList.remove("menu");
@@ -335,6 +342,7 @@ const EXAMPLES = [
   ["Product question", "What's the difference between the Cica Repair Ampoule and the Niacinamide 10% Spot Serum?"],
 ];
 function newChat() {
+  if (BUSY) return;
   CONV = null; closeMenu();
   $("#msgs").innerHTML = `<div class="welcome"><div class="brand-slot" style="display:flex;justify-content:center"></div>
     <h2>Hi ${esc(ME.display_name.split(" ")[0])}, who are we helping today?</h2>
@@ -346,10 +354,17 @@ function newChat() {
   $("#input").focus({preventScroll: true});
 }
 $("#newBtn").onclick = newChat; $("#newBtn2").onclick = newChat;
-$("#msgs").addEventListener("click", e => { const q = e.target.closest("[data-q]"); if (q) send(q.dataset.q); });
+$("#msgs").addEventListener("click", e => {
+  const remove = e.target.closest("[data-remove-field]");
+  if (remove && !remove.disabled) {
+    send(`Remove ${remove.dataset.removeLabel} constraint`, {field: remove.dataset.removeField, value: remove.dataset.removeValue});
+    return;
+  }
+  const q = e.target.closest("[data-q]"); if (q) send(q.dataset.q);
+});
 
 /* ---------- rendering ---------- */
-function card(c, logId, first) {
+function card(c, first) {
   const notes = (c.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join("");
   const benefits = (c.key_benefits || []).length ? `<ul>${c.key_benefits.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : "";
   const ings = Array.isArray(c.key_ingredients) && c.key_ingredients.length ? `<div class="ings">Key ingredients: ${esc(c.key_ingredients.join(", "))}</div>` : "";
@@ -358,8 +373,7 @@ function card(c, logId, first) {
   const badge = c.option ? (first ? "Best match" : `Choice ${c.option}`) : esc(CAT[c.category] || c.category);
   return `<div class="card ${first ? "first" : ""}"><span class="badge">${badge}</span>
     <div class="row"><div class="name">${esc(c.name)}</div><div class="price">${money(c.price)}</div></div>
-    <div class="meta">${meta}</div>${c.reason ? `<div class="why">${esc(c.reason)}</div>` : ""}${benefits}${ings}${flags}${notes}
-    ${logId ? `<div class="act"><button class="btn small" data-sold="${esc(c.sku)}" data-log="${logId}">Customer bought this</button></div>` : ""}</div>`;
+    <div class="meta">${meta}</div>${c.reason ? `<div class="why">${esc(c.reason)}</div>` : ""}${benefits}${ings}${flags}${notes}</div>`;
 }
 function render(m) {
   const wrap = document.createElement("div");
@@ -368,16 +382,21 @@ function render(m) {
     const p = m.payload || {};
     wrap.className = "msg";
     let body = `<div class="text">${md(m.content)}</div>`;
-    if (p.profile_chips?.length) body += `<div class="pchips">${p.profile_chips.map(c => `<span>${esc(c)}</span>`).join("")}</div>`;
+    if (p.profile_constraints) {
+      document.querySelectorAll(".pchips").forEach(el => el.classList.add("historical"));
+      body += `<div class="pchips">${p.profile_constraints.map(c => `<span>${esc(c.label)}<button type="button"
+        data-remove-field="${esc(c.field)}" data-remove-value="${esc(c.value)}" data-remove-label="${esc(c.label)}"
+        aria-label="Remove ${esc(c.label)} constraint" title="Remove ${esc(c.label)} constraint" ${BUSY ? "disabled" : ""}>×</button></span>`).join("")}</div>`;
+    } else if (p.profile_chips?.length) body += `<div class="pchips historical">${p.profile_chips.map(c => `<span>${esc(c)}</span>`).join("")}</div>`;
     if (p.type === "recommendation") {
       body += p.steps.map((s, i) => `<div class="step"><div class="stephead"><b>Step ${i + 1} · ${esc(CAT[s.category] || s.category)}</b>
           <span>${s.options.length > 1 ? s.options.length + " choices" : "1 choice"}${s.options.length > 1 ? '<span class="swipe"> · swipe for more</span>' : ""}</span></div>
-        <div class="opts">${s.options.map((o, j) => card(o, m.log_id, j === 0)).join("")}</div></div>`).join("");
+        <div class="opts">${s.options.map((o, j) => card(o, j === 0)).join("")}</div></div>`).join("");
       body += `<div class="total">Best-match routine: ${money(p.total)}</div>
         <div class="fb" data-log="${m.log_id}">Were these suggestions helpful?
           <button class="btn small" data-f="accepted">Yes</button><button class="btn small" data-f="rejected">Not suitable</button></div>`;
     }
-    if (p.type === "products") body += `<div class="opts" style="margin-top:8px">${p.products.map(c => card(c, null, false)).join("")}</div>`;
+    if (p.type === "products") body += `<div class="opts" style="margin-top:8px">${p.products.map(c => card(c, false)).join("")}</div>`;
     wrap.innerHTML = `<div class="avatar">G'C</div><div class="bot ${p.error ? "err" : ""}">${body}</div>`;
   }
   $("#msgs").appendChild(wrap);
@@ -388,12 +407,6 @@ const scrollDown = () => requestAnimationFrame(() => { const s = $("#scroll"); s
 
 /* ---------- feedback ---------- */
 $("#msgs").addEventListener("click", async e => {
-  const sold = e.target.closest("[data-sold]");
-  if (sold) {
-    try { await api("/api/feedback", {method: "POST", body: JSON.stringify({log_id: +sold.dataset.log, feedback: "sold", sku: sold.dataset.sold})});
-          sold.parentElement.innerHTML = `<div class="sold">✓ Sold</div>`; } catch (err) { sold.textContent = "Try again"; }
-    return;
-  }
   const f = e.target.closest(".fb [data-f]");
   if (f) { const box = f.closest(".fb");
     try { await api("/api/feedback", {method: "POST", body: JSON.stringify({log_id: +box.dataset.log, feedback: f.dataset.f})}); box.innerHTML = "Thanks for the feedback."; } catch {} }
@@ -406,15 +419,17 @@ input.addEventListener("input", autosize);
 input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#compose").requestSubmit(); } });
 $("#compose").onsubmit = e => { e.preventDefault(); send(input.value); };
 
-async function send(text) {
+async function send(text, removal = null) {
   text = (text || "").trim(); if (!text || BUSY) return;
-  BUSY = true; input.value = ""; autosize(); chips([]);
+  BUSY = true; if (!removal) input.value = ""; autosize(); chips([]);
+  document.querySelectorAll("[data-remove-field]").forEach(b => b.disabled = true);
   if (!CONV) $("#msgs").innerHTML = "";
   render({role: "user", content: text});
   const typing = document.createElement("div"); typing.className = "msg"; typing.innerHTML = `<div class="avatar">G'C</div><div class="bot"><div class="typing"><span></span><span></span><span></span></div></div>`;
   $("#msgs").appendChild(typing); scrollDown();
   try {
-    const d = await api("/api/chat", {method: "POST", body: JSON.stringify({message: text, conversation_id: CONV})});
+    const d = await api("/api/chat", {method: "POST", body: JSON.stringify({message: text, conversation_id: CONV,
+      ...(removal ? {remove_constraint: removal} : {})})});
     typing.remove();
     const isNew = !CONV; CONV = d.conversation.id;
     render(d.messages[1]); chips(d.messages[1].payload?.suggestions || []);
@@ -422,7 +437,10 @@ async function send(text) {
   } catch (err) {
     typing.remove();
     render({role: "assistant", content: err.message, payload: {type: "text", error: true}});
-  } finally { BUSY = false; autosize(); scrollDown(); }
+  } finally {
+    BUSY = false; autosize(); scrollDown();
+    document.querySelectorAll(".pchips:not(.historical) [data-remove-field]").forEach(b => b.disabled = false);
+  }
 }
 
 if (matchMedia("(max-width: 520px)").matches) input.placeholder = "Describe the customer…";

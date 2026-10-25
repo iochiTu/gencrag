@@ -20,5 +20,6 @@ venv/
 Thumbs.db
 
 # Local data
+.local/
 pgdata/
 *.log

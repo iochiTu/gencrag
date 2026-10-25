@@ -40,7 +40,7 @@ def score_candidates(cands: list[dict], profile: CustomerProfile, w: Weights | N
         m = c.get("margin_pct")
         fit = skin_fit(profile, c)
         sim = max(0.0, min(1.0, float(c.get("similarity") or 0)))
-        # cost not supplied -> margin unknown -> neutral (neither pushed nor penalised)
+        # Neither direct margin nor cost supplied -> neutral (neither pushed nor penalised).
         margin_n = 0.5 if m is None or hi <= lo else (float(m) - lo) / (hi - lo)
         prio_n = (int(c.get("priority") or 3) - 1) / 4
         boost = float(c.get("campaign_boost") or 0)
@@ -48,7 +48,8 @@ def score_candidates(cands: list[dict], profile: CustomerProfile, w: Weights | N
         out.append({**c,
                     "skin_fit": round(fit, 3), "similarity": round(sim, 3),
                     "margin_norm": round(margin_n, 3), "priority_norm": round(prio_n, 3),
-                    "business_score": round(0.5 * margin_n + 0.5 * prio_n + boost, 3),
+                    "business_score": round((w.margin * margin_n + w.prio * prio_n) / (w.margin + w.prio)
+                                            + boost, 3) if w.margin + w.prio else round(boost, 3),
                     "score": round(score, 4)})
     out.sort(key=lambda c: c["score"], reverse=True)
     return out

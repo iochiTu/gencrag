@@ -208,7 +208,7 @@
     <h2>Update products from Excel</h2>
     <p class="sub">Add new products or update existing ones (matched by SKU). The AI reads each new or changed description to work out who the product is for.</p>
     <div class="steps">
-      <div><b>1. Fill the sheet</b>Required columns: SKU, Name, Price, Description. Optional: Cost (for margin), Stock, Brand, Category, Active.</div>
+      <div><b>1. Fill the sheet</b>SKU, Name, Price, Description, plus Margin (%) and Priority. Enter margin as 40%; priority is 1–5 (5 = highest, 3 = normal). Optional: Cost, Stock, Brand, Category, Active.</div>
       <div><b>2. Check the file</b>You see what will be added or changed, and any rows with problems, before anything is saved.</div>
       <div><b>3. Import and review</b>Check what the AI understood. Products marked "check" need a quick look.</div>
     </div>
@@ -604,7 +604,7 @@ async function openDetail(sku) {
   $("#dlgErr").textContent = "";
   const d = await api("/products/" + encodeURIComponent(sku)); DETAIL = d; const p = d.product, v = d.vocab;
   $("#dlgBody").innerHTML = `<h2>${esc(p.name)}</h2>
-    <p class="sub">${esc(p.sku)} · ${money(p.price)}${p.cost != null ? " · cost " + money(p.cost) : ""} · read by ${esc(p.extracted_by || "–")}
+    <p class="sub">${esc(p.sku)} · ${money(p.price)}${p.cost != null ? " · cost " + money(p.cost) : ""} · margin ${pct(p.margin_pct)} · read by ${esc(p.extracted_by || "–")}
       ${p.needs_review ? `<br><span class="tag bad">check</span> ${esc(p.review_note || "")}` : ""}</p>
     <h3>Description (from the Excel file)</h3><div class="desc">${esc(p.description)}</div>
     <h3>Ingredients and safety flags</h3>
@@ -680,7 +680,7 @@ function showPreview(name, d) {
       `<tr><td>${i.row}</td><td>${esc(i.sku || "–")}</td><td>${esc(i.message)}</td></tr>`).join("")}</tbody></table></div>`;
   $("#pvIssues").innerHTML = (errs.length ? `<div class="warn"><b>${errs.length} row(s) will be skipped.</b> Fix them in Excel and upload again, or import the rest now.</div>${issueTable(errs)}` : "")
     + (warns.length ? `<details><summary>${warns.length} warning(s): these rows will be imported</summary>${issueTable(warns)}</details>` : "")
-    + (d.optional_missing.includes("cost") ? `<p class="note">No Cost column: margin is unknown for new products, so they are ranked as average margin.</p>` : "");
+    + (d.optional_missing.includes("cost") && d.optional_missing.includes("margin") ? `<p class="note">No Margin or Cost column: margin is unknown for new products, so it has a neutral ranking effect.</p>` : "");
   const list = (title, rows, f) => rows.length ? `<details><summary>${title} (${rows.length})</summary><div class="scroll"><table><tbody>${rows.map(f).join("")}</tbody></table></div></details>` : "";
   $("#pvLists").innerHTML = list("New products", d.diff.new, r => `<tr><td>${esc(r.sku)}</td><td>${esc(r.name)}</td><td class="num">${money(r.price)}</td></tr>`)
     + list("Changed products", d.diff.changed, r => `<tr><td>${esc(r.sku)}</td><td>${esc(r.name)}</td><td class="note">${esc(r.changes.join(", "))}</td></tr>`)

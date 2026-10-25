@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -82,20 +82,50 @@ def describe(p: CustomerProfile) -> str:
     return ", ".join(parts)
 
 
-def profile_chips(p: CustomerProfile) -> list[str]:
+class ConstraintRemoval(BaseModel):
+    field: Literal["skin_type", "sensitive", "concerns", "age", "avoid", "budget_min", "budget_max", "categories"]
+    value: str = Field(..., max_length=100)
+
+
+def profile_constraints(p: CustomerProfile) -> list[dict]:
     out = []
+    def add(field, value, label):
+        out.append({"field": field, "value": str(value), "label": label})
     if p.skin_type:
-        out.append(p.skin_type.title() + " skin")
+        add("skin_type", p.skin_type, p.skin_type.title() + " skin")
     if p.sensitive:
-        out.append("Sensitive")
-    out += [CONCERN_LABEL[c].capitalize() for c in p.concerns]
+        add("sensitive", "true", "Sensitive")
+    for c in p.concerns:
+        add("concerns", c, CONCERN_LABEL[c].capitalize())
     if p.age:
-        out.append(f"Age {p.age}")
-    out += ["No " + a.replace("_", " ") if a != "pregnancy" else "Pregnancy-safe" for a in p.avoid]
+        add("age", p.age, f"Age {p.age}")
+    for a in p.avoid:
+        add("avoid", a, "No " + a.replace("_", " ") if a != "pregnancy" else "Pregnancy-safe")
+    if p.budget_min:
+        add("budget_min", p.budget_min, f"≥ {money(p.budget_min)}")
     if p.budget_max:
-        out.append(f"≤ {money(p.budget_max)}")
-    out += [CATEGORY_PLURAL.get(c, c).capitalize() + " only" for c in p.categories]
+        add("budget_max", p.budget_max, f"≤ {money(p.budget_max)}")
+    for c in p.categories:
+        add("categories", c, CATEGORY_PLURAL.get(c, c).capitalize() + " only")
     return out
+
+
+def profile_chips(p: CustomerProfile) -> list[str]:
+    return [c["label"] for c in profile_constraints(p)]
+
+
+def remove_constraint(p: CustomerProfile, removal: ConstraintRemoval) -> CustomerProfile:
+    # Match the current value, so a chip from an outdated result cannot remove a newer constraint.
+    if not any(c["field"] == removal.field and c["value"] == removal.value for c in profile_constraints(p)):
+        raise HTTPException(409, "That constraint has changed. Reopen the chat and try again.")
+    data = p.model_dump()
+    if removal.field in ("concerns", "avoid", "categories"):
+        data[removal.field] = [v for v in data[removal.field] if v != removal.value]
+    else:
+        data[removal.field] = {"sensitive": False, "budget_min": 0}.get(removal.field)
+    new = CustomerProfile(**data)
+    # Search uses the note too: rebuild it from the remaining profile instead of retaining old constraints.
+    return new.model_copy(update={"note": describe(new)})
 
 
 def merge_chat(old: CustomerProfile, new: CustomerProfile, message: str, state: dict) -> CustomerProfile:
@@ -272,7 +302,7 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
     if RESET_RE.search(message):
         return {"intent": "reset", "profile": CustomerProfile(), "state": {},
                 "content": "Ready for the next customer. " + WELCOME, "payload": {"type": "text",
-                "suggestions": suggestions(CustomerProfile(), {})}}
+                "suggestions": suggestions(CustomerProfile(), {}), "profile_constraints": []}}
 
     skus = match_products(conn, message)
     if skus and (QUESTION_RE.search(message) or len(message.split()) <= 6):
@@ -309,15 +339,19 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
                            "Anything to avoid (pregnancy, fragrance...) or a budget helps too.",
                 "payload": {"type": "text", "suggestions": suggestions(new, state)}}
 
+    return recommendation_answer(conn, provider, user, new, state)
+
+
+def recommendation_answer(conn, provider, user: dict, new: CustomerProfile, state: dict) -> dict:
     req = RecommendRequest(profile=new, employee_id=user["username"], top_n=state.get("steps", 4),
                            options=state.get("options"))
     res = recommend(conn, provider, req)
-    summary = describe(new)
+    summary = describe(new) or "the customer"
     if res["status"] != "ok":
         return {"intent": "recommendation", "status": "no_match", "profile": new, "state": state,
                 "content": f"I couldn't find an in-stock product that fits all of this: {summary}. "
                            "Try a wider budget, a full routine, or remove a restriction.",
-                "payload": {"type": "text", "profile_chips": profile_chips(new),
+                "payload": {"type": "text", "profile_chips": profile_chips(new), "profile_constraints": profile_constraints(new),
                             "suggestions": ["No budget limit", "Full routine", "New customer"]}}
     steps = res["steps"]
     state.update({"last_prices": [st["options"][0]["price"] for st in steps], "options": res["options_per_step"],
@@ -329,7 +363,7 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
     return {"intent": "recommendation", "profile": new, "state": state, "used_llm": res["used_llm"],
             "model": res["model"], "skus": state["last_skus"], "log_id": res["log_id"], "content": content,
             "payload": {"type": "recommendation", "steps": steps, "currency": res["currency"],
-                        "total": res["total"], "profile_chips": profile_chips(new),
+                        "total": res["total"], "profile_chips": profile_chips(new), "profile_constraints": profile_constraints(new),
                         "suggestions": suggestions(new, state, steps)}}
 
 
@@ -337,6 +371,7 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
 class ChatBody(BaseModel):
     conversation_id: Optional[int] = None
     message: str = Field(..., min_length=1, max_length=2000)
+    remove_constraint: Optional[ConstraintRemoval] = None
 
 
 def _conv(conn, conv_id: int, user: dict) -> dict:
@@ -362,10 +397,18 @@ def chat(body: ChatBody, user: dict = Depends(require_staff)):
         else:
             conv = conn.execute("INSERT INTO chat_conversations (user_id, title) VALUES (%s, %s) RETURNING *",
                                 (user["id"], message[:60])).fetchone()
+        if body.remove_constraint:
+            if not body.conversation_id:
+                raise HTTPException(400, "Open a conversation before removing a constraint.")
+            updated_profile = remove_constraint(CustomerProfile(**(conv["profile"] or {})), body.remove_constraint)
+            current = next(c for c in profile_constraints(CustomerProfile(**conv["profile"]))
+                           if c["field"] == body.remove_constraint.field and c["value"] == body.remove_constraint.value)
+            message = f"Remove {current['label']} constraint"
         um = conn.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (%s, 'user', %s) RETURNING *",
                           (conv["id"], message)).fetchone()
         try:
-            out = answer(conn, _provider, user, conv, message)
+            out = (recommendation_answer(conn, _provider, user, updated_profile, dict(conv["state"] or {}))
+                   if body.remove_constraint else answer(conn, _provider, user, conv, message))
             status = out.get("status", "ok")
         except ProviderError as e:
             log.warning("chat provider error: %s", e)
@@ -411,7 +454,8 @@ def conversation(conv_id: int, user: dict = Depends(require_staff)):
     with connect() as conn:
         c = _conv(conn, conv_id, user)
         msgs = conn.execute("SELECT * FROM chat_messages WHERE conversation_id = %s ORDER BY id", (conv_id,)).fetchall()
-    return {"conversation": {"id": c["id"], "title": c["title"]}, "messages": [_msg_out(m) for m in msgs]}
+    return {"conversation": {"id": c["id"], "title": c["title"]}, "messages": [_msg_out(m) for m in msgs],
+            "profile_constraints": profile_constraints(CustomerProfile(**(c["profile"] or {})))}
 
 
 @router.delete("/conversations/{conv_id}")

@@ -28,7 +28,7 @@ def run_sql_file(name: str) -> None:
 CANDIDATE_SQL = """
 SELECT p.sku, p.name, p.brand, p.category, p.routine_step,
        p.price::float AS price, p.stock_qty, p.description,
-       ((p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct,
+       COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct,
        COALESCE(br.priority, 3) AS priority,
        CASE WHEN br.sku IS NOT NULL
              AND (br.valid_from IS NULL OR br.valid_from <= current_date)

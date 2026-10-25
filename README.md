@@ -27,7 +27,47 @@ staff message ─> chat (app/chat.py): remembers the customer, follow-ups, produ
 | `foundry` | Your Microsoft Foundry deployments (GPT-4.1/5, DeepSeek, Llama, Grok, ...) | e.g. `text-embedding-3-large` at 1024-d | Production on Azure |
 | `mock` | none (rule-based) | hash vectors | Tests |
 
-## 1. Local test on Windows (Ollama + Qwen 3.5 9B)
+## 1. Local testing (Ollama + Qwen 3.5 9B)
+
+### macOS
+
+For an environment already set up locally, start Docker Desktop, then run:
+
+```bash
+cd /path/to/gencrag
+bash scripts/start-local.sh
+```
+
+Open http://localhost:8000 for chat or http://localhost:8000/admin for the manager portal.
+Local test login details are saved in `.local/local-access.md` when provided during setup.
+The launcher starts PostgreSQL and Ollama if needed, then runs the chatbot in the foreground;
+Ctrl+C stops the chatbot. It preserves existing products and accounts.
+Project-local Ollama models live in `.local/models`, and its log is `.local/logs/ollama.log`.
+If a database port is occupied, set `POSTGRES_PORT` in `.env` and use that same port in
+`DATABASE_URL` (this Mac's local setup uses `55432`).
+The configured Mac setup uses `qwen3.5:9b-q4_K_M`, an explicit Qwen 9B quantization,
+for both `OLLAMA_CHAT_MODEL` and `OLLAMA_PARSE_MODEL`.
+To stop PostgreSQL, run `docker compose stop`; to stop the project-local Ollama server,
+run `kill "$(cat .local/ollama.pid)"` if this launcher started it.
+
+For a fresh Mac setup, install Python 3.11+, Docker Desktop, and Ollama, then:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env  # set ADMIN_PASSWORD and a random SECRET_KEY
+ollama pull qwen3.5:9b
+ollama pull bge-m3
+docker compose up -d
+.venv/bin/python -m app.ingest --init --seed --embed  # new, empty database only
+.venv/bin/python -m app.users add tester "Local Tester"
+bash scripts/start-local.sh
+```
+
+The launcher uses `.local/models` when it starts Ollama. If you pulled models using an installed
+Ollama, keep that Ollama server running before launching (so it uses the same model store).
+
+### Windows
 
 Requirements: Python 3.11+, Docker Desktop, [Ollama for Windows](https://ollama.com/download).
 `qwen3.5:9b` is about 6.6 GB: runs well on a GPU with 8 GB+ VRAM, or on CPU with 16 GB RAM (slower).
@@ -59,10 +99,13 @@ keeps your data). Never run `--seed` on real data: it wipes the product tables.
   ingredients and warnings ("ingredient list not on file", "expires in 20 days", "only 2 left").
 - **Refine** in follow-up messages or tap a suggestion: "cheaper options", "she is pregnant",
   "she's not pregnant", "only serums", "full routine", "more choices", "no budget limit".
+- **Remove a constraint** with the × on a profile chip in the latest result. Recommendations refresh
+  using the remaining skin type, concerns, age, budget, ingredient restrictions and categories.
 - **Ask about products**: "Is the Retinol Repair Serum OK during pregnancy?", "What's the difference
   between the Cica Repair Ampoule and the Spot Serum?" Answers use only the product data on file.
 - **New customer** clears what the chat remembered. Past chats are listed in the menu.
-- **Customer bought this** on a card records the sale for analytics.
+- Stock filtering remains active. Sale-recording APIs are retained for a future purchase feature;
+  product cards currently have no purchase button.
 
 Design follows gencbeauty.com: white pages, navy (#0F0F2D) bars, uppercase Nunito buttons, Cabin text,
 pill search-style input, green prices. Logo from `BRAND_LOGO_URL` (falls back to a text wordmark).
@@ -88,7 +131,8 @@ Every change is logged with the manager's name and time. Put the service behind 
 ## 4. Updating products from Excel (operations staff)
 
 1. **Fill the sheet.** Only **SKU** is required as a column. A new product needs **SKU, Name, Price**
-   (a Description is strongly advised). Optional: Cost (for margin), Stock, Brand, Category, Active,
+   (a Description is strongly advised). Add **Margin (%)** and **Priority** for business ranking.
+   Optional: Cost (margin fallback for older catalogs), Stock, Brand, Category, Active,
    **Expiry**, **Ingredients**. Column names can vary ("Product Code", "Retail Price", "Details", "Best
    before", "INCI" all work). *Download Excel template* gives a sheet with instructions;
    `samples/sample_products.xlsx` is an example.
@@ -99,18 +143,26 @@ Every change is logged with the manager's name and time. Put the service behind 
 4. **Import**: the AI reads only new or changed descriptions. Progress is shown.
 5. **Review** products marked **check** and correct them if needed.
 
+**Margin (%)** accepts `40%`, an Excel percentage cell, or plain `40` for a 40% margin (range 0–100%).
+Direct margin overrides the calculation from Price and Cost, so price changes do not change that margin.
+**Priority** accepts whole numbers from 1 to 5: 1 = lowest, 3 = normal (default), 5 = highest.
+Give popular products a higher priority to favor them among suitable choices. The Ranking strategy sliders
+control how much margin and manual priority affect recommendations. Price only filters budget eligibility;
+Qwen receives no product price in its ranking shortlist. Safety and suitability filters always apply.
+You can use just `SKU, Name, Price, Description, Margin (%), Priority`; Cost is not needed when Margin is supplied.
+
 ### Missing or messy data is fine
 
 | In the file | What happens |
 | --- | --- |
 | Empty cell, `N/A`, `-`, `TBD`, `#N/A`, `#VALUE!` | Treated as "not given". For an existing product the current value is kept. |
-| Bad optional value (cost "abc", stock "lots", unreadable date) | Warning, value ignored, the row is still imported. |
+| Bad optional value (margin outside 0–100%, priority outside 1–5, cost "abc", stock "lots", unreadable date) | Warning, value ignored, the row is still imported. |
 | New product without name or price | That row is skipped with an explanation; the rest is imported. |
 | No description | Imported, the AI reads only the name, marked *check*. |
 | No ingredient list | Imported, marked *check*. Safety flags are also read from the description text ("with 0.3% retinol"; "fragrance-free" does not count). By default hidden from customers who must avoid an ingredient; setting in Ranking strategy. |
 | No expiry date | Treated as not expiring. Expired products, and (setting) those expiring within 30 days, are never recommended. |
 | Dates | Excel date cells, `2027-06-30`, `20270630`, `06/2027`, `Mar 2027`, `31/03/2027` are read exactly. Ambiguous `03/04/2027` follows `DATE_ORDER` (MDY default) and shows a warning. Month-only = end of that month. |
-| A file with only SKU + Price (or SKU + Stock) | Updates just those values. |
+| A file with SKU plus Price, Stock, Margin or Priority | Updates just those values. Empty cells preserve existing values; margin/priority-only changes do not re-read descriptions or re-embed products. |
 | Notes or totals rows without SKU/name | Ignored. Duplicate SKUs: the second row is skipped. |
 | AI model down during import | Products are saved using rules only; *Retry now* in Products makes them searchable later. |
 

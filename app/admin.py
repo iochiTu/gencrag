@@ -158,7 +158,7 @@ def post_preview(body: PreviewBody, _: str = Depends(require_admin)):
 # ------------------------------------------------------------------ products: priority & campaigns
 PRODUCTS_SQL = """
 SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost,
-       ((p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct, p.stock_qty, p.is_active,
+       COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct, p.stock_qty, p.is_active,
        a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age,
        COALESCE(a.needs_review, a.sku IS NULL) AS needs_review, a.review_note, a.extracted_by,
        p.embedding IS NOT NULL AS searchable, p.expiry_date, COALESCE(a.text_flags, '{}') AS text_flags,
@@ -243,20 +243,20 @@ def get_activity(days: int = 30, _: str = Depends(require_admin)):
                    count(DISTINCT employee_id) AS employees
             FROM recommendation_log WHERE created_at > now() - make_interval(days => %(d)s)""", p).fetchone()
         m = conn.execute("""
-            SELECT avg(((pr.price - pr.cost) / NULLIF(pr.price, 0)))::float AS picked_margin
+            SELECT avg(COALESCE(pr.margin_pct, (pr.price - pr.cost) / NULLIF(pr.price, 0)))::float AS picked_margin
             FROM recommendation_log l, jsonb_array_elements(l.picks) x JOIN products pr ON pr.sku = x->>'sku'
             WHERE l.created_at > now() - make_interval(days => %(d)s)""", p).fetchone()
-        c = conn.execute("SELECT avg(((price - cost) / NULLIF(price, 0)))::float AS catalog_margin "
+        c = conn.execute("SELECT avg(COALESCE(margin_pct, (price - cost) / NULLIF(price, 0)))::float AS catalog_margin "
                          "FROM products WHERE is_active").fetchone()
         top = conn.execute("""
             SELECT x->>'sku' AS sku, pr.name, pr.category, count(*) AS recommended,
                    count(*) FILTER (WHERE l.feedback = 'sold'
                                     AND (l.feedback_sku IS NULL OR l.feedback_sku = x->>'sku')) AS sold,
                    count(*) FILTER (WHERE l.feedback = 'rejected') AS rejected,
-                   ((pr.price - pr.cost) / NULLIF(pr.price, 0))::float AS margin_pct
+                   COALESCE(pr.margin_pct, (pr.price - pr.cost) / NULLIF(pr.price, 0))::float AS margin_pct
             FROM recommendation_log l, jsonb_array_elements(l.picks) x JOIN products pr ON pr.sku = x->>'sku'
             WHERE l.created_at > now() - make_interval(days => %(d)s)
-            GROUP BY 1, 2, 3, pr.price, pr.cost ORDER BY recommended DESC, sold DESC LIMIT 10""", p).fetchall()
+            GROUP BY 1, 2, 3, pr.price, pr.cost, pr.margin_pct ORDER BY recommended DESC, sold DESC LIMIT 10""", p).fetchall()
         recent = conn.execute("""
             SELECT id, created_at, employee_id, profile->>'note' AS note, profile->'concerns' AS concerns,
                    (SELECT array_agg(x->>'sku') FROM jsonb_array_elements(picks) x) AS skus,
@@ -351,6 +351,7 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
     with connect() as conn:
         p = conn.execute(
             """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost, p.stock_qty,
+                      COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct,
                       p.is_active, p.description, p.embedding IS NOT NULL AS searchable,
                       a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age, a.texture,
                       a.fragrance_free, a.key_benefits, a.needs_review, a.review_note, a.extracted_by,

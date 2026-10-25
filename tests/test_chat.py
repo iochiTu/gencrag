@@ -177,3 +177,75 @@ def test_admin_analytics_and_csv(client):
     assert csv.status_code == 200 and csv.headers["content-type"].startswith("text/csv")
     lines = csv.text.lstrip("﻿").splitlines()
     assert lines[0].startswith("time_utc,event,staff") and len(lines) > 10
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('skin_type', 'dry'), ('sensitive', 'true'), ('concerns', 'acne'),
+    ('age', '40'), ('avoid', 'pregnancy'), ('budget_min', '10.0'),
+    ('budget_max', '30.0'), ('categories', 'serum'),
+])
+def test_remove_one_constraint_preserves_the_rest(field, value):
+    from app.chat import ConstraintRemoval, profile_constraints, remove_constraint
+    p = CustomerProfile(skin_type='dry', sensitive=True, concerns=['acne', 'redness'], age=40,
+                        avoid=['pregnancy', 'fragrance'], budget_min=10, budget_max=30,
+                        categories=['serum', 'cream'], note='pregnant, dry, acne, age 40, under $30')
+    new = remove_constraint(p, ConstraintRemoval(field=field, value=value))
+    old_chips = profile_constraints(p)
+    new_chips = profile_constraints(new)
+    assert new_chips == [c for c in old_chips if not (c['field'] == field and c['value'] == value)]
+    assert p.note == 'pregnant, dry, acne, age 40, under $30'  # original is untouched
+    assert new.note != p.note  # old free text cannot reintroduce the removed constraint
+
+
+def test_stale_constraint_cannot_remove_a_new_value():
+    from fastapi import HTTPException
+    from app.chat import ConstraintRemoval, remove_constraint
+    with pytest.raises(HTTPException) as error:
+        remove_constraint(CustomerProfile(budget_max=50), ConstraintRemoval(field='budget_max', value='30.0'))
+    assert error.value.status_code == 409
+
+
+@DB
+def test_remove_constraint_refreshes_results_without_parsing(client, monkeypatch):
+    from app import chat
+    from app.db import connect
+    from tests.conftest import staff_login
+    staff_login(client, 'chip-tester', 'chip-password-123')
+    conv, first = say(client, 'Dry skin, fine lines, age 40, only serums, under $30')
+    assert all(o['price'] <= 30 for st in first['payload']['steps'] for o in st['options'])
+    assert 'SR-003' not in [o['sku'] for st in first['payload']['steps'] for o in st['options']]
+    budget = next(c for c in first['payload']['profile_constraints'] if c['field'] == 'budget_max')
+    def unexpected_parse(*args, **kwargs):
+        raise AssertionError('Constraint removal must bypass language parsing')
+    monkeypatch.setattr(chat, 'parse_text', unexpected_parse)
+    r = client.post('/api/chat', json={'conversation_id': conv, 'message': 'Remove budget',
+                                     'remove_constraint': {'field': budget['field'], 'value': budget['value']}})
+    assert r.status_code == 200, r.text
+    refreshed = r.json()['messages'][1]['payload']
+    assert refreshed['type'] == 'recommendation'
+    assert 'SR-003' in [o['sku'] for st in refreshed['steps'] for o in st['options']]
+    assert all(o['category'] == 'serum' for st in refreshed['steps'] for o in st['options'])
+    with connect() as c:
+        profile = c.execute('SELECT profile FROM chat_conversations WHERE id=%s', (conv,)).fetchone()['profile']
+    assert profile['budget_max'] is None and profile['skin_type'] == 'dry'
+    assert profile['age'] == 40 and profile['concerns'] == ['wrinkles'] and profile['categories'] == ['serum']
+    assert '$30' not in profile['note']
+    assert client.post('/api/chat', json={'conversation_id': conv, 'message': 'Remove stale budget',
+        'remove_constraint': {'field': budget['field'], 'value': budget['value']}}).status_code == 409
+
+
+@DB
+def test_remove_last_constraint_and_reject_other_staff(client):
+    from tests.conftest import staff_login
+    staff_login(client, 'last-chip', 'chip-password-123')
+    conv, first = say(client, 'Only serums')
+    action = {'field': 'categories', 'value': 'serum'}
+    r = client.post('/api/chat', json={'conversation_id': conv, 'message': 'Remove serums', 'remove_constraint': action})
+    assert r.status_code == 200
+    payload = r.json()['messages'][1]['payload']
+    assert payload['type'] == 'recommendation' and payload['profile_constraints'] == []
+    assert any(st['category'] != 'serum' for st in payload['steps'])
+    assert client.get(f'/api/conversations/{conv}').json()['profile_constraints'] == []
+    assert client.post('/api/chat', json={'message': 'Remove serums', 'remove_constraint': action}).status_code == 400
+    staff_login(client, 'other-chip', 'chip-password-123')
+    assert client.post('/api/chat', json={'conversation_id': conv, 'message': 'Remove serums', 'remove_constraint': action}).status_code == 404

@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS products (
     category      TEXT NOT NULL,              -- see products_category_check below
     routine_step  SMALLINT NOT NULL,           -- 1 cleanser .. 6 sunscreen, 7 mask, 8 other
     price         NUMERIC(12,2) NOT NULL CHECK (price >= 0),   -- in CURRENCY from .env
-    cost          NUMERIC(12,2) CHECK (cost >= 0),             -- optional; NULL = margin unknown
+    cost          NUMERIC(12,2) CHECK (cost >= 0),             -- optional; used when no direct margin is supplied
+    margin_pct    NUMERIC(9,6) CHECK (margin_pct BETWEEN 0 AND 1), -- direct margin fraction, independent of price
     stock_qty     INTEGER,                                     -- optional; NULL = not tracked (treated as in stock)
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     description   TEXT NOT NULL,
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS product_ingredients (
 );
 
 -- Commercial levers, maintained by sales / merchandising.
--- Margin itself is computed from price and cost.
+-- Direct margin takes precedence; price and cost remain a fallback for older catalogs.
 CREATE TABLE IF NOT EXISTS business_rules (
     sku            TEXT PRIMARY KEY REFERENCES products(sku) ON DELETE CASCADE,
     priority       SMALLINT NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
@@ -115,6 +116,7 @@ ALTER TABLE products DROP CONSTRAINT IF EXISTS products_category_check;
 ALTER TABLE products ADD CONSTRAINT products_category_check CHECK (category IN
     ('cleanser','toner','essence','serum','cream','sunscreen','mask','other'));
 ALTER TABLE products ALTER COLUMN cost DROP NOT NULL;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS margin_pct NUMERIC(9,6) CHECK (margin_pct BETWEEN 0 AND 1);
 ALTER TABLE products ALTER COLUMN stock_qty DROP NOT NULL;
 ALTER TABLE products ALTER COLUMN stock_qty DROP DEFAULT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS description_hash TEXT;     -- re-analyse only when it changes

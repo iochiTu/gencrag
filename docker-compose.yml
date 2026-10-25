@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: rag
       POSTGRES_DB: kbeauty
     ports:
-      - "5432:5432"   # change the left number (e.g. "5433:5432") if 5432 is already used
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 volumes:

@@ -53,8 +53,9 @@ Rules:
 - Choose ONLY SKUs from the shortlist. Never invent products, prices, ingredients or claims.
 - Base your choice on each product's description, benefits, skin types, ages and ingredients.
 - Customer fit comes first. When two products fit about equally, prefer the higher business_score.
+- Price is only a budget eligibility filter, never a ranking preference. All shortlist products fit the budget.
 - Reason: one short sentence per option, in English, saying why it suits THIS customer and how it
-  differs from the other options (e.g. lighter texture, lower price, stronger active).
+  differs from the other options (e.g. lighter texture, stronger active).
   No medical claims (say "helps with", never "treats" or "cures").
 - Return ONLY JSON:
   {{"steps": [{{"category": "serum", "options": [{{"sku": "...", "reason": "..."}}]}}], "routine_tip": "..."}}"""
@@ -75,7 +76,7 @@ def _shortlist_for_llm(shortlist: list[dict]) -> str:
     lines = []
     for i, c in enumerate(shortlist, 1):
         lines.append(json.dumps({k: v for k, v in {
-            "n": i, "sku": c["sku"], "name": c["name"], "category": c["category"], "price": c["price"],
+            "n": i, "sku": c["sku"], "name": c["name"], "category": c["category"],
             "skin_types": c.get("suitable_skin_types"), "targets": c.get("target_concerns"), "ages": _ages(c),
             "benefits": (c.get("key_benefits") or [])[:3],
             "key_ingredients": (c.get("key_ingredients") or [])[:5] if c.get("ingredients_known", True) else "not on file",

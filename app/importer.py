@@ -17,6 +17,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import threading
 import traceback
@@ -36,6 +37,8 @@ COLUMNS = {   # canonical -> accepted header spellings (lower-case, spaces/under
     "name":        ["name", "productname", "itemname", "title", "product"],
     "price":       ["price", "retailprice", "sellingprice", "msrp", "rrp", "unitprice", "saleprice"],
     "description": ["description", "productdescription", "details", "desc", "info", "productinfo"],
+    "margin":      ["margin", "marginpct", "marginpercent", "marginpercentage", "profitmargin", "grossmargin"],
+    "priority":    ["priority", "productpriority", "manualpriority", "recommendationpriority", "popularity"],
     "cost":        ["cost", "unitcost", "costprice", "cogs", "purchaseprice"],
     "stock":       ["stock", "qty", "quantity", "stockqty", "inventory", "onhand", "available"],
     "brand":       ["brand", "brandname", "line"],
@@ -81,7 +84,7 @@ STRONG_FLAGS = {"retinoid", "aha", "bha", "fragrance", "essential_oil"}
 
 
 def _key(h: Any) -> str:
-    return re.sub(r"[\s_\-\.\*/()]+", "", str(h or "")).lower()
+    return re.sub(r"[\s_\-\.\*/()%]+", "", str(h or "")).lower()
 
 
 def _map_headers(header: list[Any]) -> dict[str, int]:
@@ -99,14 +102,25 @@ def _rows_from_xlsx(data: bytes) -> list[list[Any]]:
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     best: list[list[Any]] = []
-    for ws in wb.worksheets:                      # use the first sheet that has a SKU + Name header
-        rows = [list(r) for r in ws.iter_rows(values_only=True)]
-        for i, r in enumerate(rows[:15]):
-            m = _map_headers(r)
-            if "sku" in m and len(m) >= 2:
-                return rows[i:]
-        best = best or rows
-    return best
+    try:
+        for ws in wb.worksheets:
+            cells = list(ws.iter_rows())
+            rows = [[c.value for c in r] for r in cells]
+            for i, r in enumerate(rows[:15]):
+                m = _map_headers(r)
+                if "sku" in m and len(m) >= 2:
+                    if "margin" in m:
+                        col = m["margin"]
+                        for values, cell_row in zip(rows[i + 1:], cells[i + 1:]):
+                            c = cell_row[col]
+                            # Excel stores 40% as 0.4; bare numbers use percentage points.
+                            if isinstance(c.value, (int, float)) and not isinstance(c.value, bool) and "%" in c.number_format:
+                                values[col] = f"{c.value * 100}%"
+                    return rows[i:]
+            best = best or rows
+        return best
+    finally:
+        wb.close()
 
 
 def _rows_from_csv(data: bytes) -> list[list[Any]]:
@@ -153,6 +167,28 @@ def _money(v: Any) -> float | None:
         return float(s)
     except ValueError:
         return None
+
+
+def _margin(v: Any) -> float | None:
+    """Percentage points (40 or '40%') to a stored fraction (0.4)."""
+    if blank(v) or isinstance(v, bool):
+        return None
+    s = str(v).strip().rstrip("%").strip().replace(",", ".")
+    try:
+        pct = float(s)
+    except ValueError:
+        return None
+    return pct / 100 if math.isfinite(pct) and 0 <= pct <= 100 else None
+
+
+def _priority(v: Any) -> int | None:
+    if blank(v) or isinstance(v, bool):
+        return None
+    try:
+        n = float(str(v).strip())
+    except ValueError:
+        return None
+    return int(n) if math.isfinite(n) and n.is_integer() and 1 <= n <= 5 else None
 
 
 def _int(v: Any) -> int | None:
@@ -275,6 +311,14 @@ def read_table(filename: str, data: bytes, date_order: str = "MDY") -> dict:
         errs, warns = [], []
         raw_price, raw_cost, raw_stock = get("price"), get("cost"), get("stock")
         price, cost, stock = _money(raw_price), _money(raw_cost), _int(raw_stock)
+        raw_margin = get("margin")
+        margin = _margin(raw_margin)
+        if not blank(raw_margin) and margin is None:
+            warns.append(f"Margin {raw_margin!r} must be a percentage from 0% to 100%; ignored")
+        raw_priority = get("priority")
+        priority = _priority(raw_priority)
+        if not blank(raw_priority) and priority is None:
+            warns.append(f"Priority {raw_priority!r} must be a whole number from 1 to 5 (5 = highest); ignored")
         if not blank(raw_price) and (price is None or price < 0):
             warns.append(f"Price {raw_price!r} is not a number; ignored")
             price = None
@@ -299,6 +343,8 @@ def read_table(filename: str, data: bytes, date_order: str = "MDY") -> dict:
             warns.append("Description is longer than 8,000 characters; the rest is cut off")
             description = description[:8000]
         row = {"row": n, "sku": _sku(get("sku")), "name": _text(get("name")), "price": price, "cost": cost,
+               "margin_pct": margin,
+               "priority": priority,
                "stock": stock, "brand": _text(get("brand")), "category": category, "active": active,
                "description": description, "ingredients_text": ing_col,
                "expiry": expiry.isoformat() if expiry else None}
@@ -373,9 +419,10 @@ def desc_hash(name: str, description: str) -> str:
 
 def diff_rows(conn, rows: list[dict]) -> dict:
     db = {r["sku"]: r for r in conn.execute(
-        "SELECT p.sku, p.name, p.price::float AS price, p.cost::float AS cost, p.stock_qty, p.brand, p.category, "
-        "p.is_active, p.description, p.description_hash, p.expiry_date, a.sku IS NOT NULL AS has_attrs FROM products p "
-        "LEFT JOIN product_attributes a USING (sku)").fetchall()}
+        "SELECT p.sku, p.name, p.price::float AS price, p.cost::float AS cost, p.margin_pct::float AS margin_pct, p.stock_qty, p.brand, p.category, "
+        "p.is_active, p.description, p.description_hash, p.expiry_date, COALESCE(br.priority, 3) AS priority, "
+        "a.sku IS NOT NULL AS has_attrs FROM products p "
+        "LEFT JOIN product_attributes a USING (sku) LEFT JOIN business_rules br USING (sku)").fetchall()}
     new, changed, unchanged = [], [], []
     for r in rows:
         if not r["ok"]:
@@ -395,6 +442,10 @@ def diff_rows(conn, rows: list[dict]) -> dict:
             fields.append("description")
         if r["cost"] is not None and (old["cost"] is None or abs(old["cost"] - r["cost"]) > 0.004):
             fields.append("cost")
+        if r.get("margin_pct") is not None and (old["margin_pct"] is None or abs(old["margin_pct"] - r["margin_pct"]) > 0.0000005):
+            fields.append(f"margin → {r['margin_pct'] * 100:g}%")
+        if r.get("priority") is not None and old["priority"] != r["priority"]:
+            fields.append(f"priority {old['priority']} → {r['priority']}")
         if r["stock"] is not None and old["stock_qty"] != r["stock"]:
             fields.append(f"stock {old['stock_qty']} → {r['stock']}")
         if r["brand"] and old["brand"] != r["brand"]:
@@ -678,7 +729,7 @@ def run_job(job_id: int, provider: Provider, actor: str, connect, embed) -> None
         results, counts = [], {"created": 0, "updated": 0, "unchanged": 0, "analyzed": 0, "needs_review": 0, "failed": 0}
         try:
             for i, r in enumerate(rows, start=1):
-                results.append(_import_row(conn, r, provider, use_ai, opts.get("reanalyze_all", False), counts))
+                results.append(_import_row(conn, r, provider, use_ai, opts.get("reanalyze_all", False), counts, actor))
                 conn.execute("UPDATE import_jobs SET done = %s, results = %s::jsonb, summary = COALESCE(summary, '{}'::jsonb) || %s::jsonb WHERE id = %s",
                              (i, json.dumps(results), json.dumps({"stage": "analyzing", "counts": counts}), job_id))
             deactivated = 0
@@ -704,11 +755,13 @@ def run_job(job_id: int, provider: Provider, actor: str, connect, embed) -> None
                          (f"{e}\n{traceback.format_exc(limit=3)}", job_id))
 
 
-def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: dict) -> dict:
+def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: dict, actor: str = "import") -> dict:
     sku = r["sku"]
     try:
-        old = conn.execute("SELECT p.*, p.price::float AS price_f, p.cost::float AS cost_f, a.sku IS NOT NULL AS has_attrs "
-                           "FROM products p LEFT JOIN product_attributes a USING (sku) WHERE p.sku = %s", (sku,)).fetchone()
+        old = conn.execute("SELECT p.*, p.price::float AS price_f, p.cost::float AS cost_f, p.margin_pct::float AS margin_f, "
+                           "COALESCE(br.priority, 3) AS priority, a.sku IS NOT NULL AS has_attrs "
+                           "FROM products p LEFT JOIN product_attributes a USING (sku) "
+                           "LEFT JOIN business_rules br USING (sku) WHERE p.sku = %s", (sku,)).fetchone()
         given_desc = (full_description(r.get("description"), r.get("ingredients_text"))
                       if (r.get("description") or r.get("ingredients_text")) else None)
         if old is None:
@@ -718,10 +771,10 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
             h = desc_hash(name, desc)
             cat = r.get("category") or "other"
             conn.execute(
-                """INSERT INTO products (sku, name, brand, category, routine_step, price, cost, stock_qty, is_active,
+                """INSERT INTO products (sku, name, brand, category, routine_step, price, cost, margin_pct, stock_qty, is_active,
                                          description, description_hash, expiry_date)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (sku, name, r.get("brand"), cat, ROUTINE_STEP[cat], r["price"], r.get("cost"), r.get("stock"),
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (sku, name, r.get("brand"), cat, ROUTINE_STEP[cat], r["price"], r.get("cost"), r.get("margin_pct"), r.get("stock"),
                  True if r.get("active") is None else r["active"], desc, h, r.get("expiry")))
             action, analyse = "created", True
         else:
@@ -731,6 +784,8 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
             h = desc_hash(name, desc)
             changed = (old["name"] != name or abs(old["price_f"] - price) > 0.004 or old["description_hash"] != h
                        or (r.get("cost") is not None and (old["cost_f"] is None or abs(old["cost_f"] - r["cost"]) > 0.004))
+                       or (r.get("margin_pct") is not None and (old["margin_f"] is None or abs(old["margin_f"] - r["margin_pct"]) > 0.0000005))
+                       or (r.get("priority") is not None and old["priority"] != r["priority"])
                        or (r.get("stock") is not None and old["stock_qty"] != r["stock"])
                        or (r.get("brand") and old["brand"] != r["brand"])
                        or (r.get("active") is not None and old["is_active"] != r["active"])
@@ -738,15 +793,20 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
                        or (r.get("expiry") and str(old["expiry_date"]) != r["expiry"]))
             conn.execute(
                 """UPDATE products SET name = %s, price = %s, description = %s, description_hash = %s,
-                       brand = COALESCE(%s, brand), cost = COALESCE(%s, cost), stock_qty = COALESCE(%s, stock_qty),
+                       brand = COALESCE(%s, brand), cost = COALESCE(%s, cost), margin_pct = COALESCE(%s, margin_pct), stock_qty = COALESCE(%s, stock_qty),
                        is_active = COALESCE(%s, is_active), expiry_date = COALESCE(%s::date, expiry_date),
                        updated_at = now() WHERE sku = %s""",
-                (name, price, desc, h, r.get("brand"), r.get("cost"), r.get("stock"), r.get("active"), r.get("expiry"), sku))
+                (name, price, desc, h, r.get("brand"), r.get("cost"), r.get("margin_pct"), r.get("stock"), r.get("active"), r.get("expiry"), sku))
             action = "updated" if changed else "unchanged"
             analyse = (reanalyze or not old["has_attrs"] or old["description_hash"] != h
                        or bool(r.get("category") and r["category"] != old["category"]))
             if not analyse and (old["name"] != name or (r.get("brand") and r["brand"] != old["brand"])):
                 conn.execute("UPDATE products SET embedding = NULL WHERE sku = %s", (sku,))   # search text changed
+        if r.get("priority") is not None and (old is None or old["priority"] != r["priority"]):
+            conn.execute(
+                """INSERT INTO business_rules (sku, priority, updated_by) VALUES (%s, %s, %s)
+                   ON CONFLICT (sku) DO UPDATE SET priority = EXCLUDED.priority,
+                       updated_by = EXCLUDED.updated_by, updated_at = now()""", (sku, r["priority"], actor))
         counts[action] += 1
         if not analyse:
             return {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": False}
@@ -785,19 +845,19 @@ def template_xlsx() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Products"
-    headers = ["SKU", "Name", "Price", "Description", "Cost", "Stock", "Brand", "Category", "Active", "Expiry", "Ingredients"]
+    headers = ["SKU", "Name", "Price", "Description", "Margin (%)", "Priority", "Cost", "Stock", "Brand", "Category", "Active", "Expiry", "Ingredients"]
     ws.append(headers)
     ws.append(["SR-101", "Cica Calming Serum", 24.00,
                "A lightweight serum that calms redness and irritation and helps with breakouts. "
                "Suitable for sensitive, oily and combination skin, ages 18 and over. Fragrance-free.\n"
                "Ingredients: Water, Centella Asiatica Extract, Glycerin, Niacinamide, Panthenol, Madecassoside",
-               7.20, 120, "Sample", "serum", "yes", "2027-06-30", ""])
+               0.70, 5, 7.20, 120, "Sample", "serum", "yes", "2027-06-30", ""])
     ws.append(["CR-205", "Ginseng Firming Night Cream", 52.00,
                "Rich night cream for mature, dry skin (40+) that softens fine lines and improves firmness. "
                "Not recommended during pregnancy.\n"
                "Ingredients: Water, Ginseng Root Extract, Shea Butter, Retinol, Adenosine, Fragrance",
-               11.50, 25, "Sample", "", "yes", "", ""])
-    for i, w in enumerate([12, 30, 10, 90, 10, 9, 14, 14, 9, 13, 50], start=1):
+               0.78, 3, 11.50, 25, "Sample", "", "yes", "", ""])
+    for i, w in enumerate([12, 30, 10, 90, 14, 12, 10, 9, 14, 14, 9, 13, 50], start=1):
         ws.column_dimensions[chr(64 + i)].width = w
     req = PatternFill("solid", fgColor="F9D5E1")
     opt = PatternFill("solid", fgColor="EEEEEE")
@@ -808,26 +868,37 @@ def template_xlsx() -> bytes:
         for c in row:
             c.alignment = Alignment(wrap_text=True, vertical="top")
     ws.freeze_panes = "A2"
+    for row in (2, 3):
+        ws.cell(row=row, column=5).number_format = "0.0%"
     dv = DataValidation(type="list", formula1='"' + ",".join(CATEGORIES) + '"', allow_blank=True)
-    dv.add("H2:H5000")
+    dv.add("J2:J5000")
     dv2 = DataValidation(type="list", formula1='"yes,no"', allow_blank=True)
-    dv2.add("I2:I5000")
+    dv2.add("K2:K5000")
     ws.add_data_validation(dv)
     ws.add_data_validation(dv2)
+    priority_dv = DataValidation(type="whole", operator="between", formula1=1, formula2=5, allow_blank=True)
+    priority_dv.showErrorMessage = True
+    priority_dv.error = "Enter a whole number from 1 to 5 (5 = highest priority)."
+    priority_dv.add("F2:F5000")
+    ws.add_data_validation(priority_dv)
 
     how = wb.create_sheet("How to fill")
     lines = [
         ("How to fill the product sheet", True),
         ("", False),
         ("Required (pink): SKU, Name, Price, Description.", False),
-        ("Optional (grey): Cost (needed for margin), Stock (empty = always available), Brand, Category, Active (yes/no),", False),
+        ("Optional (grey): Margin (%), Priority (1-5), Cost (fallback when Margin is unknown), Stock (empty = always available), Brand, Category, Active (yes/no),", False),
         ("  Expiry (e.g. 2027-06-30 or 06/2027; empty = not tracked), Ingredients (if not already in the description).", False),
         ("", False),
         ("Empty cells are fine:", True),
         ("- Leave a cell empty (or write N/A) if you don't know the value. For a product that already exists, an empty cell keeps the current value.", False),
         ("- A NEW product needs at least SKU, Name and Price. Without a description it is imported but marked 'check'.", False),
         ("- Without an ingredient list, the product is hidden from customers who must avoid an ingredient (setting in Ranking strategy).", False),
-        ("- A file with only SKU and Price (or SKU and Stock) updates just those values.", False),
+        ("- A file with SKU plus Price, Stock, Margin or Priority updates just those values.", False),
+        ("- Margin: enter 40% (or 40 in a plain numeric cell) for a 40% margin. Use 0% to give zero margin. Valid range: 0% to 100%.", False),
+        ("- Margin affects ranking priority. Price only filters the customer's budget. Direct Margin overrides the margin calculated from Price and Cost.", False),
+        ("- Priority: 1 = lowest, 3 = normal (default), 5 = highest. Give popular products a higher number to favor them among suitable options.", False),
+        ("- Ranking strategy controls the balance of customer fit, margin and manual priority. Safety and budget filters always apply.", False),
         ("- Products past their expiry date, or expiring soon (setting), are not recommended.", False),
         ("", False),
         ("Writing a good Description - the AI reads it to decide who each product is for:", True),

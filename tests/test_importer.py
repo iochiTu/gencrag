@@ -26,6 +26,32 @@ def test_template_round_trips():
     p = read_table("template.xlsx", importer.template_xlsx())
     assert len(p["rows"]) == 2 and all(r["ok"] for r in p["rows"]) and not p["issues"]
     assert p["rows"][0]["category"] == "serum" and p["rows"][0]["cost"] == 7.2
+    assert [r["margin_pct"] for r in p["rows"]] == [0.70, 0.78]
+    assert [r["priority"] for r in p["rows"]] == [5, 3]
+
+
+def test_excel_percentage_cells_and_plain_values():
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "Margin (%)", "Manual Priority"])
+    for row in [("A", 0.4, 5), ("B", 40, 3), ("C", "40%", 1), ("D", 0, ""), ("E", "100%", 4)]:
+        ws.append(row)
+    ws["B2"].number_format = "0.0%"
+    buf = io.BytesIO()
+    wb.save(buf)
+    p = read_table("margins.xlsx", buf.getvalue())
+    assert not p["issues"]
+    assert [r["margin_pct"] for r in p["rows"]] == [0.4, 0.4, 0.4, 0, 1]
+    assert [r["priority"] for r in p["rows"]] == [5, 3, 1, None, 4]
+
+
+@pytest.mark.parametrize("margin,priority", [("-1%", "0"), ("101%", "6"), ("NaN", "2.5"), ("inf", "inf"), ("abc", "popular")])
+def test_bad_margin_and_priority_warn_without_overwriting(margin, priority):
+    p = read_table("business.csv", f"SKU,Margin,Priority\nA,{margin},{priority}\n".encode())
+    assert p["rows"][0]["ok"]
+    assert p["rows"][0]["margin_pct"] is None and p["rows"][0]["priority"] is None
+    assert len(p["issues"]) == 2 and all(i["level"] == "warning" for i in p["issues"])
 
 
 def test_header_synonyms_prices_and_numeric_skus():
@@ -292,3 +318,52 @@ def test_import_with_blanks_keeps_existing_values_and_hides_unsafe(client):
     # expired products are never recommended
     r = client.post("/recommend", json={"profile": {"skin_type": "oily", "concerns": ["acne"]}, "top_n": 5, "options": 4}).json()
     assert "NW-005" not in [o["sku"] for st in r["steps"] for o in st["options"]]
+
+
+@pytestmark_db
+def test_margin_and_priority_import_updates_ranking_without_reanalysis(client):
+    from app.db import connect
+    from app.scoring import score_candidates
+    from app.models import CustomerProfile
+    desc = "Gentle serum for dry skin and dehydration. Fragrance-free. Ingredients: Water, Glycerin, Panthenol"
+    rows = [("MP-A", "Hydrating Serum", 10, desc, "40%", 1),
+            ("MP-B", "Hydrating Serum", 30, desc, "40%", 5)]
+    pv, job = upload_and_run(client, xlsx(rows, headers=("SKU", "Name", "Price", "Description", "Margin (%)", "Priority")))
+    assert job["status"] == "done" and job["summary"]["counts"]["created"] == 2
+    prods = {p["sku"]: p for p in client.get("/admin/api/products").json()["products"]}
+    assert prods["MP-B"]["margin_pct"] == 0.4 and prods["MP-B"]["priority"] == 5
+
+    # Identical customer fit and margin: manually favored product is first, despite its higher price.
+    r = client.post("/recommend", json={"profile": {"categories": ["serum"], "concerns": ["dryness"]}, "options": 4}).json()
+    assert r["steps"][0]["options"][0]["sku"] == "MP-B"
+    budget = client.post("/recommend", json={"profile": {"categories": ["serum"], "budget_max": 20}, "options": 4}).json()
+    assert "MP-B" not in [o["sku"] for st in budget["steps"] for o in st["options"]]
+
+    with connect() as conn:
+        before = conn.execute("SELECT embedding::text AS embedding FROM products WHERE sku = 'MP-A'").fetchone()
+        conn.execute("UPDATE business_rules SET campaign_boost = 0.07, excluded = TRUE WHERE sku = 'MP-A'")
+    pv, job = upload_and_run(client, b"SKU,Margin,Priority\nMP-A,80%,5\n", filename="business.csv")
+    counts = job["summary"]["counts"]
+    assert pv["summary"]["changed"] == 1
+    assert "margin → 80%" in pv["diff"]["changed"][0]["changes"]
+    assert "priority 1 → 5" in pv["diff"]["changed"][0]["changes"]
+    assert counts["updated"] == 1 and counts["analyzed"] == 0 and counts["embedded"] == 0
+    with connect() as conn:
+        after = conn.execute("SELECT margin_pct::float AS margin, embedding::text AS embedding FROM products WHERE sku = 'MP-A'").fetchone()
+        rule = conn.execute("SELECT * FROM business_rules WHERE sku = 'MP-A'").fetchone()
+    assert after["margin"] == 0.8 and after["embedding"] == before["embedding"]
+    assert rule["priority"] == 5 and rule["excluded"] and float(rule["campaign_boost"]) == 0.07 and rule["updated_by"] == "Ops"
+
+    # Blank business cells and price/cost updates keep the direct margin and manual priority.
+    _, job = upload_and_run(client, b"SKU,Price,Cost,Margin,Priority\nMP-A,50,49,,\n", filename="prices.csv")
+    assert job["summary"]["counts"]["analyzed"] == 0
+    p = next(p for p in client.get("/admin/api/products").json()["products"] if p["sku"] == "MP-A")
+    assert p["margin_pct"] == 0.8 and p["priority"] == 5 and p["price"] == 50
+    assert client.get("/admin/api/products/MP-A").json()["product"]["margin_pct"] == 0.8
+    assert client.get("/admin/api/analytics").status_code == 200
+    scored = score_candidates([{**p, "similarity": 0.5}, {**p, "price": 1, "similarity": 0.5}], CustomerProfile())
+    assert scored[0]["score"] == scored[1]["score"]
+    _, job = upload_and_run(client, b"SKU,Margin,Priority\nMP-A,0%,3\n", filename="zero.csv")
+    assert job["summary"]["counts"]["updated"] == 1
+    p = next(p for p in client.get("/admin/api/products").json()["products"] if p["sku"] == "MP-A")
+    assert p["margin_pct"] == 0 and p["priority"] == 3

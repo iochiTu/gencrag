@@ -1,5 +1,5 @@
 from app.models import CustomerProfile
-from app.recommender import llm_rerank, sanitize
+from app.recommender import _shortlist_for_llm, llm_rerank, sanitize
 from app.scoring import Weights, build_steps, pick_diverse, score_candidates
 
 
@@ -20,6 +20,26 @@ def test_margin_breaks_ties():
     prof = CustomerProfile(concerns=["dryness"])
     s = score_candidates([cand("LOW", "serum", ["dryness"], 0.5), cand("HIGH", "serum", ["dryness"], 0.8)], prof, Weights())
     assert s[0]["sku"] == "HIGH"
+
+
+def test_manual_priority_breaks_ties_and_price_is_not_a_ranking_signal():
+    prof = CustomerProfile(concerns=["dryness"])
+    low = {**cand("LOW", "serum", ["dryness"], 0.4, prio=1), "price": 5}
+    high = {**cand("HIGH", "serum", ["dryness"], 0.4, prio=5), "price": 50}
+    scored = score_candidates([low, high], prof)
+    assert scored[0]["sku"] == "HIGH"
+    changed = score_candidates([{**low, "price": 50}, {**high, "price": 5}], prof)
+    assert [r["score"] for r in changed] == [r["score"] for r in scored]
+    assert '"price"' not in _shortlist_for_llm(scored)
+
+
+def test_llm_business_score_respects_margin_priority_weights():
+    prof = CustomerProfile()
+    cands = [cand("M", "serum", [], 0.8, prio=1), cand("P", "serum", [], 0.4, prio=5)]
+    assert score_candidates(cands, prof, Weights(margin=0.35, prio=0))[0]["business_score"] == 1
+    priority = score_candidates(cands, prof, Weights(margin=0, prio=0.35))
+    assert priority[0]["sku"] == "P" and priority[0]["business_score"] == 1
+    assert score_candidates(cands, prof, Weights(margin=0, prio=0))[0]["business_score"] == 0
 
 
 def test_pick_diverse_builds_routine():
