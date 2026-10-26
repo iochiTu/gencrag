@@ -94,6 +94,19 @@ class OllamaProvider:
 
 
 # --------------------------------------------------------------------------- Amazon Bedrock
+# Ways to switch Claude's thinking off, tried in order until the model accepts one: older Claude takes
+# "disabled", Sonnet 5.5 only "between_tools", Opus 5.5 neither (it always thinks, so ask for low effort).
+CLAUDE_THINKING_OFF = [{"thinking": {"type": "disabled"}}, {"thinking": {"type": "between_tools"}},
+                       {"output_config": {"effort": "low"}}, None]
+
+
+def _validation_message(e: Exception) -> str:
+    """Lower-cased message of a Bedrock ValidationException (the model rejected a request field), else ''."""
+    resp = getattr(e, "response", None)
+    err = resp.get("Error", {}) if isinstance(resp, dict) else {}
+    return (err.get("Message") or "").lower() if err.get("Code") == "ValidationException" else ""
+
+
 class BedrockProvider:
     name = "bedrock"
 
@@ -102,6 +115,7 @@ class BedrockProvider:
             import boto3
             client = boto3.client("bedrock-runtime", region_name=settings.aws_region)
         self.rt = client
+        self._opts: dict[str, dict] = {}            # per model: the request options it accepted
 
     def model_label(self, role: Role) -> str:
         return settings.bedrock_parse_model if role == "parse" else settings.bedrock_chat_model
@@ -131,12 +145,29 @@ class BedrockProvider:
         return out
 
     def chat(self, system, user, role="rank"):
-        resp = self.rt.converse(
-            modelId=self.model_label(role),
-            system=[{"text": system}],
-            messages=[{"role": "user", "content": [{"text": user}]}],
-            inferenceConfig={"maxTokens": 1500, "temperature": 0.2},
-        )
+        model = self.model_label(role)
+        claude = settings.disable_thinking and ("anthropic" in model or "claude" in model)
+        opts = self._opts.get(model) or {"temperature": True, "think": 0 if claude else len(CLAUDE_THINKING_OFF) - 1}
+        while True:
+            extra = CLAUDE_THINKING_OFF[opts["think"]]
+            try:
+                resp = self.rt.converse(
+                    modelId=model,
+                    system=[{"text": system}],
+                    messages=[{"role": "user", "content": [{"text": user}]}],
+                    inferenceConfig={"maxTokens": 1500, **({"temperature": 0.2} if opts["temperature"] else {})},
+                    **({"additionalModelRequestFields": extra} if extra else {}),
+                )
+                break
+            except Exception as e:
+                msg = _validation_message(e)
+                if opts["temperature"] and "temperature" in msg:
+                    opts = {**opts, "temperature": False}       # Claude 4.7+ accept only the default sampling
+                elif extra and any(w in msg for w in ("thinking", "effort", "output_config")):
+                    opts = {**opts, "think": opts["think"] + 1}
+                else:
+                    raise
+        self._opts[model] = opts
         parts = resp["output"]["message"]["content"]
         return "".join(p.get("text", "") for p in parts)
 
@@ -156,6 +187,25 @@ def foundry_base(endpoint: str) -> str:
     return e + "/openai/v1"
 
 
+REASONING_EFFORT_OFF = ["none", "minimal", "low"]     # lowest first; GPT-5 has "minimal" but not "none"
+
+
+def relax_chat_options(opts: dict, error: str) -> dict:
+    """Optional chat fields minus the ones a 400 error names (softened where possible); none named -> drop all."""
+    named = [k for k in opts if k in error]
+    if not named:
+        return {}
+    out = dict(opts)
+    for k in named:
+        v = out.pop(k)
+        if k == "max_tokens" and "max_completion_tokens" in error:
+            out["max_completion_tokens"] = v                       # reasoning models renamed the limit
+        elif (k == "reasoning_effort" and v in REASONING_EFFORT_OFF[:-1]
+              and re.search(rf"\b{v}\b", error.replace(k, ""))):
+            out[k] = REASONING_EFFORT_OFF[REASONING_EFFORT_OFF.index(v) + 1]   # the value, not the field, was rejected
+    return out
+
+
 class FoundryProvider:
     name = "foundry"
 
@@ -165,7 +215,7 @@ class FoundryProvider:
         self.sleep = sleep
         self._token, self._token_exp = None, 0.0
         self._send_dimensions = True
-        self._plain_chat: set[str] = set()          # deployments that reject JSON mode / temperature
+        self._chat_opts: dict[str, dict] = {}       # per deployment: the optional chat fields it accepted
 
     def model_label(self, role: Role) -> str:
         return settings.foundry_parse_deployment if role == "parse" else settings.foundry_chat_deployment
@@ -230,18 +280,20 @@ class FoundryProvider:
     def chat(self, system, user, role="rank"):
         dep = self.model_label(role)
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        attempts = [{"model": dep, "messages": msgs}] if dep in self._plain_chat else [
-            {"model": dep, "messages": msgs, "temperature": 0.2, "max_tokens": 1500,
-             "response_format": {"type": "json_object"}},
-            {"model": dep, "messages": msgs}]               # reasoning / non-OpenAI models reject some options
-        for i, body in enumerate(attempts):
-            r = self._post("/chat/completions", body, dep)
-            if r.status_code == 400 and i + 1 < len(attempts) and "content_filter" not in r.text:
-                self._plain_chat.add(dep)
-                continue
-            break
+        opts = self._chat_opts.get(dep)
+        if opts is None:
+            opts = {"temperature": 0.2, "max_tokens": 1500, "response_format": {"type": "json_object"}}
+            if settings.disable_thinking:
+                opts["reasoning_effort"] = REASONING_EFFORT_OFF[0]   # GPT-5+ / GPT Luna / o-series
+                opts["thinking"] = {"type": "disabled"}              # DeepSeek V3.1+ / Flash
+        for _ in range(8):
+            r = self._post("/chat/completions", {"model": dep, "messages": msgs, **opts}, dep)
+            if r.status_code != 400 or not opts or "content_filter" in r.text:
+                break
+            opts = relax_chat_options(opts, r.text)     # the deployment rejected a field: drop or soften it
         if r.status_code >= 400:
             raise ProviderError(f"Foundry chat error {r.status_code}: {r.text[:300]}")
+        self._chat_opts[dep] = opts
         msg = r.json()["choices"][0]["message"]
         return msg.get("content") or ""
 

@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+.local
+.venv
+venv
+.pytest_cache
+__pycache__
+*.py[cod]
+*.log
+.DS_Store
+tests
+pgdata
+Dockerfile
+.dockerignore

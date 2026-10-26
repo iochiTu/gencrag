@@ -185,7 +185,22 @@ FOUNDRY_EMBED_DEPLOYMENT=text-embedding-3-large
 ```
 Works with models on Foundry's OpenAI-compatible endpoint (GPT, DeepSeek, Llama, Grok, ...). Models that
 reject JSON mode or temperature are retried automatically; rate limits (429) are retried with back-off.
+Claude is not served on that endpoint: use `LLM_PROVIDER=bedrock` for Claude.
 Embeddings are requested at `EMBED_DIM` (1024); a model with a fixed different size is reported clearly.
+
+**Thinking off (`DISABLE_THINKING=true`, the default).** Reasoning models think before answering unless told
+not to, and those tokens are billed as output (they can double the cost per message) and slow the chat down.
+The app asks every model not to think and learns, on the first call per model, which request fields it accepts:
+
+| Model | What is sent | Dropped automatically if the model rejects it |
+| --- | --- | --- |
+| GPT Luna, GPT-5+, o-series (Foundry) | `reasoning_effort: none` (then `minimal`, `low`) | `temperature`; `max_tokens` becomes `max_completion_tokens` |
+| DeepSeek Flash / V3.1+ (Foundry) | `thinking: disabled` | |
+| Claude on Bedrock | `thinking: disabled`, Sonnet 5.5 `between_tools`, Opus 5.5 `effort: low` | `temperature` (Claude 4.7+ accept only the default) |
+| Qwen3 / Qwen3.5 (Ollama) | `think: false` | |
+
+A model that rejects a field costs one extra, failed call per field after each app start; later calls go
+straight through.
 
 After switching provider or embedding model: `python -m app.ingest --reembed`.
 
@@ -223,6 +238,27 @@ from staff appear in Activity.
 for real use put it behind HTTPS: a reverse proxy (Caddy, nginx, IIS) with a certificate, or a cloud host
 (Azure App Service / Container Apps, AWS App Runner / ECS). Sessions use HTTP-only cookies and are marked
 secure automatically behind HTTPS.
+
+### Azure Container Apps
+
+Production runs as one container (`Dockerfile`) in Azure Container Apps, with Azure Database for
+PostgreSQL (Flexible Server, `vector` extension allowed) and Microsoft Foundry (`gpt-4.1-mini` for chat,
+`text-embedding-3-large` at 1024-d). The app reaches Foundry with its user-assigned managed identity
+(`FOUNDRY_AUTH=entra`, role *Cognitive Services OpenAI User*), so no API key is stored. `DATABASE_URL`,
+`ADMIN_PASSWORD` and `SECRET_KEY` are Container App secrets. Each container start runs
+`python -m app.ingest --init`, so schema changes apply on deploy; product embeddings are created by the
+admin Excel import.
+
+To deploy the current checkout (needs Docker Desktop and `az login`):
+
+```bash
+bash scripts/deploy-azure.sh
+```
+
+Account settings live in `.local/azure.env` and secrets in `.local/azure-secrets.env` (both git-ignored);
+`--config` re-applies secrets and environment variables. Azure for Students limits apply: only five
+regions are allowed, one standard Container Apps environment per subscription (this app uses an Express
+environment), and ACR Tasks are blocked, so the image is built locally.
 
 ## 10. Tests
 

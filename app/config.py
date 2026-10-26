@@ -30,12 +30,16 @@ class Settings:
     # Cohere Embed v4 and Titan Text Embeddings V2 (Bedrock).
     embed_dim: int = int(_env("EMBED_DIM", "1024"))
 
+    # Ask reasoning models (DeepSeek Flash, GPT Luna / GPT-5+, Claude Sonnet 5.5, Qwen3) not to think:
+    # thinking tokens are billed as output and slow answers down, and these tasks do not need them.
+    disable_thinking: bool = _env("DISABLE_THINKING", "true").lower() == "true"
+
     # --- Ollama (local) ---
     ollama_url: str = _env("OLLAMA_URL", "http://localhost:11434")
     ollama_chat_model: str = _env("OLLAMA_CHAT_MODEL", "qwen3.5:9b")
     ollama_parse_model: str = _env("OLLAMA_PARSE_MODEL", "qwen3.5:9b")
     ollama_embed_model: str = _env("OLLAMA_EMBED_MODEL", "bge-m3")
-    ollama_disable_thinking: bool = _env("OLLAMA_DISABLE_THINKING", "true").lower() == "true"
+    ollama_disable_thinking: bool = _env("OLLAMA_DISABLE_THINKING", _env("DISABLE_THINKING", "true")).lower() == "true"
     ollama_timeout_s: float = float(_env("OLLAMA_TIMEOUT_S", "300"))
 
     # --- Amazon Bedrock (production) ---
