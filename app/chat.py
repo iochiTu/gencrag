@@ -5,6 +5,8 @@ to avoid, age, budget, categories) and refines it with every message:
   "combination skin, breakouts, under $30"  -> recommendation (routine steps with several choices)
   "she's also pregnant" / "cheaper" / "only serums" / "more choices"  -> refined recommendation
   "is the Cica Repair Ampoule OK for sensitive skin?"  -> answer grounded in that product's data
+  "which of your products have niacinamide?" / "what does an essence do?" / "where are they made?"
+      -> free answer (catalog facts + general skincare knowledge), ending with products to recommend
   "new customer"  -> forget the profile
 Every turn is written to analytics_events for reporting.
 """
@@ -22,11 +24,11 @@ from pydantic import BaseModel, Field
 from .analytics import track
 from .auth import require_staff
 from .config import settings
-from .db import connect, save_feedback
+from .db import connect, log_recommendation, save_feedback
 from .models import CONCERN_LABEL, CustomerProfile, RecommendRequest
 from .parsing import parse_text
 from .providers import ProviderError, extract_json
-from .recommender import recommend, sanitize
+from .recommender import rank, recommend, retrieve, sanitize, template_reason
 from .strategy import load_ranking
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -49,8 +51,19 @@ MORE_RE = re.compile(r"\b(more (options|choices|products)|other options|alternat
 FEWER_RE = re.compile(r"\b(fewer (options|choices)|just one|only one (option|choice)|single option)\b", re.I)
 FULL_ROUTINE_RE = re.compile(r"\b(full routine|whole routine|all steps|complete routine|any category)\b", re.I)
 NO_BUDGET_RE = re.compile(r"\b(no budget|any price|price doesn'?t matter|no (price )?limit|remove (the )?budget)\b", re.I)
+# a question that asks for products to offer, or refines the last ones, stays a routine recommendation
+RECOMMEND_RE = re.compile(r"\b(recommend\w*|suggest\w*|routine|what should (she|he|they|i|we) (use|buy|get|try)|"
+                          r"looking for|options?|choices?|alternatives?)\b|^\s*(what|how) about\b", re.I)
 NEG_RE = re.compile(r"\b(not|no longer|isn'?t|is not|not anymore|never)\s+(pregnant|nursing|breast-?feeding|sensitive)", re.I)
 GENERIC = {"the", "a", "an", "and", "or", "for", "with", "of", "in", "to", "by", "ml", "spf", "spf50", "new"}
+# words that say nothing about which product is meant ("which of your products contain ...")
+QSTOP = {"what", "which", "who", "where", "when", "why", "how", "does", "did", "are", "is", "can", "could", "would",
+         "should", "do", "you", "your", "our", "we", "they", "them", "she", "her", "his", "him", "this", "that", "these",
+         "those", "any", "some", "have", "has", "had", "carry", "sell", "stock", "product", "products", "item", "items",
+         "brand", "brands", "ingredient", "ingredients", "contain", "contains", "made", "from", "about", "tell", "explain",
+         "type", "types", "kind", "kinds", "skin", "good", "best", "use", "using", "used", "there", "much", "many",
+         "range", "line", "difference", "between", "compare", "versus", "than", "more", "most", "also", "like", "want",
+         "need", "customer", "please", "know", "come", "comes", "there", "here", "into", "with", "without", "get"}
 CATEGORY_PLURAL = {"cleanser": "cleansers", "toner": "toners", "essence": "essences", "serum": "serums",
                    "cream": "moisturizers", "sunscreen": "sunscreens", "mask": "masks", "other": "other products"}
 
@@ -214,22 +227,25 @@ def product_card(r: dict) -> dict:
 
 
 QA_SYSTEM = """You help a K-beauty store employee answer a question about specific products.
-Use ONLY the product facts given. If the facts do not answer the question, say what is not on file and
-suggest checking the label or asking a manager. Be concise (at most 120 words), practical and friendly.
+Facts about these products (origin, ingredients, price, suitability) come ONLY from the product facts given;
+if they are not on file, say so and suggest checking the label or asking a manager. You may add general
+skincare knowledge to explain them (what an ingredient does, how a product type is used), accurately and
+cautiously. Be concise (at most 120 words), practical and friendly.
 No medical claims: say "helps with", never "treats" or "cures". For pregnancy or allergy questions, point
 out relevant ingredients/flags from the facts and suggest the customer checks with their doctor if unsure.
 Return ONLY JSON: {"answer": "..."}"""
 
 
-def _facts_for_llm(rows: list[dict]) -> str:
+def _facts_for_llm(rows: list[dict], eligible: set[str] | None = None) -> str:
     out = []
     for r in rows:
         out.append(json.dumps({k: v for k, v in {
-            "sku": r["sku"], "name": r["name"], "category": r["category"], "price": r["price"],
+            "sku": r["sku"], "name": r["name"], "brand": r.get("brand"), "category": r["category"], "price": r["price"],
             "skin_types": r.get("suitable_skin_types"), "helps_with": r.get("target_concerns"), "ages": _ages(r),
             "not_for": r.get("avoid_for"), "flags": sorted(set((r.get("flags") or []) + (r.get("text_flags") or []))),
             "benefits": r.get("key_benefits"), "ingredients": r.get("ingredients") or "not on file",
             "description": (r.get("description") or "")[:900], "in_stock": r.get("stock_qty"),
+            "can_recommend": None if eligible is None else r["sku"] in eligible,
         }.items() if v not in (None, [], "")}, default=str))
     return "\n".join(out)
 
@@ -289,7 +305,112 @@ def suggestions(p: CustomerProfile, state: dict, steps: list[dict] | None = None
 
 WELCOME = ("Tell me about the customer and I'll suggest products, best match first with a few choices per step. "
            "For example: *Combination skin, breakouts and redness, 24, under $30*.\n\n"
-           "You can also ask about a product, like *Is the Retinol Repair Serum OK during pregnancy?*")
+           "You can also ask anything about our products, like *Is the Retinol Repair Serum OK during pregnancy?* "
+           "or *Which of our products have niacinamide?*")
+
+
+def is_open_question(message: str) -> bool:
+    """A question to answer in its own right (ingredients, origin, product types...), not a request for a routine."""
+    return bool(QUESTION_RE.search(message)) and not RECOMMEND_RE.search(message)
+
+
+def _stem(t: str) -> str:
+    return t[:max(4, len(t) - 2)]
+
+
+def catalog_search(conn, message: str, limit: int = 4) -> list[str]:
+    """Active products whose name, brand, category, description or ingredients mention the question's words
+    ("niacinamide", "jeju", "vegan", "ampoules"). Words found in most of the catalog do not single anything out."""
+    terms = {t for t in _tokens(message) if len(t) >= 3 and t not in QSTOP}
+    if not terms:
+        return []
+    rows = conn.execute(
+        """SELECT p.sku, lower(concat_ws(' ', p.name, p.brand, p.category, p.description,
+                  (SELECT string_agg(i.inci_name, ' ') FROM product_ingredients pi
+                     JOIN ingredients i ON i.id = pi.ingredient_id WHERE pi.sku = p.sku))) AS text
+           FROM products p WHERE p.is_active ORDER BY p.sku""").fetchall()
+    words = {r["sku"]: set(re.findall(r"[a-z0-9]+", r["text"])) for r in rows}
+    hits = {t: {sku for sku, ws in words.items() if any(w.startswith(_stem(t)) for w in ws)} for t in terms}
+    common = max(2, len(rows) // 2)
+    score: dict[str, int] = {}
+    for t, skus in hits.items():
+        if len(skus) <= common or len(rows) <= 4:
+            for sku in skus:
+                score[sku] = score.get(sku, 0) + 1
+    return sorted(score, key=lambda s: -score[s])[:limit]
+
+
+OPEN_SYSTEM = """You are the product assistant of a K-beauty store. A sales employee asks you a question, often
+while helping a customer. It may be about skincare in general (what an essence is, what an ingredient does, how to
+layer products) or about our products (brands, where they come from, ingredients, product types, what we carry).
+
+Rules:
+- Answer the question itself first, directly and helpfully.
+- Facts about OUR products (names, prices, origin, ingredients, suitability) come ONLY from the catalog facts given.
+  If a fact is not on file, say so and suggest checking the label or asking a manager. Never invent products.
+- General skincare knowledge is fine, kept accurate and cautious. No medical claims: say "helps with", never
+  "treats" or "cures". For pregnancy, allergies or skin conditions, suggest checking with a doctor if unsure.
+- Name our products when they answer the question.
+- Then choose 1 to 3 products to recommend, ONLY from facts with "can_recommend": true, best fit for the question
+  and the customer first, each with one short sentence on why. Do not repeat the recommendations in the answer.
+- Keep the answer under 150 words, friendly and practical.
+Return ONLY JSON: {"answer": "...", "recommend": [{"sku": "...", "reason": "..."}]}"""
+
+
+def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn: CustomerProfile,
+                state: dict, message: str) -> dict:
+    """Answer a broader question from catalog facts (and general knowledge), then recommend our products.
+    `turn` is the customer plus anything the question adds (for this answer only); `kept` is what is remembered.
+    Recommendations come only from products that passed the customer's safety, stock and budget filters."""
+    eligible = rank(retrieve(conn, provider, turn.model_copy(update={"note": message}), ranking), turn, ranking)
+    eligible = eligible[: settings.shortlist_size]
+    by_sku = {c["sku"]: c for c in eligible}
+    mentioned = catalog_search(conn, message)
+    # products the question names first, then the best matches for this customer
+    rows = product_facts(conn, list(dict.fromkeys(mentioned + [c["sku"] for c in eligible[:6]])))
+    facts = {r["sku"]: r for r in rows}
+
+    text, picks, used_llm = None, [], False
+    if ranking.use_llm_rerank and provider is not None and rows:
+        who = describe(turn)
+        try:
+            data = extract_json(provider.chat(
+                OPEN_SYSTEM, f"Question: {message}\n" + (f"Customer: {who}\n" if who else "")
+                + "\nCatalog facts (one JSON per line):\n" + _facts_for_llm(rows, set(by_sku)), role="rank")) or {}
+            text = sanitize(str(data.get("answer") or ""), 1500) or None
+            for o in data.get("recommend") or []:
+                sku = str(o.get("sku", "")).strip() if isinstance(o, dict) else ""
+                if sku in by_sku and sku in facts and sku not in [p[0] for p in picks] and len(picks) < 3:
+                    picks.append((sku, sanitize(str(o.get("reason") or ""))))
+            used_llm = bool(text)
+        except Exception as e:                        # model down: answer from the facts
+            log.warning("open question fell back to rules: %s", e)
+    if not text:
+        named = [facts[s] for s in mentioned if s in facts][:3]
+        text = (rule_answer(named, message) if named else
+                "I don't have a detailed answer to that on file, so please check with a manager.")
+    # always end with something to offer: products the question names first, then the best-scored ones
+    for c in sorted(eligible, key=lambda c: c["sku"] not in mentioned):
+        if len(picks) >= 3:
+            break
+        if c["sku"] in facts and c["sku"] not in [p[0] for p in picks]:
+            picks.append((c["sku"], ""))
+
+    cards = [{**product_card(facts[s]), "reason": r or template_reason(by_sku[s], turn)} for s, r in picks]
+    log_id = None
+    if cards:
+        text += "\n\n**From our range, I'd suggest:**"
+        log_id = log_recommendation(
+            conn, employee_id=user["username"], request={"question": message}, profile=turn.model_dump(),
+            candidates=[{"sku": c["sku"], "score": c["score"]} for c in eligible],
+            picks=[{"sku": c["sku"], "reason": c["reason"], "step": c["category"], "option": i + 1}
+                   for i, c in enumerate(cards)],
+            model=provider.model_label("rank") if used_llm else "fallback", used_llm=used_llm)
+    state["last_prices"] = [c["price"] for c in cards] or state.get("last_prices")
+    return {"intent": "open_question", "profile": kept, "state": state, "used_llm": used_llm,
+            "model": provider.model_label("rank") if used_llm else "rules", "skus": [c["sku"] for c in cards],
+            "log_id": log_id, "content": text,
+            "payload": {"type": "products", "products": cards, "suggestions": suggestions(kept, state)}}
 
 
 # ------------------------------------------------------------------ one chat turn
@@ -312,7 +433,7 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
             try:
                 data = extract_json(provider.chat(QA_SYSTEM, f"Question: {message}\n\nProduct facts (one JSON per line):\n"
                                                   + _facts_for_llm(rows), role="rank")) or {}
-                text = sanitize(str(data.get("answer") or ""))[:1200] or None
+                text = sanitize(str(data.get("answer") or ""), 1200) or None
                 used_llm = bool(text)
             except Exception as e:                    # model down: fall back to facts
                 log.warning("product question fell back to rules: %s", e)
@@ -333,6 +454,10 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
         state["options"] = min(4, (state.get("options") or ranking.options_per_step) + 1)
     if FEWER_RE.search(message):
         state["options"] = 1
+    if is_open_question(message):
+        # remember safety facts from the question ("she's pregnant, is niacinamide OK?"), not what it was about
+        kept = profile.model_copy(update={"avoid": new.avoid, "sensitive": new.sensitive})
+        return open_answer(conn, provider, user, ranking, kept, new, state, message)
     if not (new.skin_type or new.concerns or new.categories or new.avoid or new.age or new.sensitive):
         return {"intent": "clarify", "profile": new, "state": state,
                 "content": "I need a little more about the customer: what's their skin type and main concern? "

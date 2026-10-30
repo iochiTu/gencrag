@@ -103,6 +103,12 @@ keeps your data). Never run `--seed` on real data: it wipes the product tables.
   using the remaining skin type, concerns, age, budget, ingredient restrictions and categories.
 - **Ask about products**: "Is the Retinol Repair Serum OK during pregnancy?", "What's the difference
   between the Cica Repair Ampoule and the Spot Serum?" Answers use only the product data on file.
+- **Ask broader questions**: "Which of our products have niacinamide?", "What's an essence?", "Where are
+  our products made?" The answer is free-form (facts about our products come only from the catalog; general
+  skincare knowledge may explain them) and always ends with up to 3 of our products to suggest, chosen only
+  from those that pass the customer's safety, stock and budget filters. Safety facts in a question
+  ("she's pregnant, ...") are remembered for later recommendations. Asking for a routine, recommendations
+  or more options still gives the step-by-step routine.
 - **New customer** clears what the chat remembered. Past chats are listed in the menu.
 - Stock filtering remains active. Sale-recording APIs are retained for a future purchase feature;
   product cards currently have no purchase button.

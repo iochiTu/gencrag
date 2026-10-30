@@ -396,7 +396,9 @@ function render(m) {
         <div class="fb" data-log="${m.log_id}">Were these suggestions helpful?
           <button class="btn small" data-f="accepted">Yes</button><button class="btn small" data-f="rejected">Not suitable</button></div>`;
     }
-    if (p.type === "products") body += `<div class="opts" style="margin-top:8px">${p.products.map(c => card(c, false)).join("")}</div>`;
+    if (p.type === "products") body += `<div class="opts" style="margin-top:8px">${p.products.map(c => card(c, false)).join("")}</div>`
+      + (m.log_id ? `<div class="fb" data-log="${m.log_id}">Were these suggestions helpful?
+          <button class="btn small" data-f="accepted">Yes</button><button class="btn small" data-f="rejected">Not suitable</button></div>` : "");
     wrap.innerHTML = `<div class="avatar">G'C</div><div class="bot ${p.error ? "err" : ""}">${body}</div>`;
   }
   $("#msgs").appendChild(wrap);

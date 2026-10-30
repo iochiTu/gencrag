@@ -511,7 +511,7 @@ def analytics(days: int = 30, _: str = Depends(require_admin)):
                    count(DISTINCT conversation_id) FILTER (WHERE event = 'chat') AS conversations,
                    count(DISTINCT user_id) FILTER (WHERE event = 'chat') AS active_staff,
                    count(*) FILTER (WHERE event = 'chat' AND intent = 'recommendation' AND status = 'ok') AS recommendations,
-                   count(*) FILTER (WHERE event = 'chat' AND intent = 'product_question') AS product_questions,
+                   count(*) FILTER (WHERE event = 'chat' AND intent IN ('product_question', 'open_question')) AS product_questions,
                    count(*) FILTER (WHERE event = 'chat' AND status = 'no_match') AS no_match,
                    count(*) FILTER (WHERE event = 'chat' AND status = 'error') AS errors,
                    round(avg(latency_ms) FILTER (WHERE event = 'chat'))::int AS avg_ms,
@@ -529,7 +529,7 @@ def analytics(days: int = 30, _: str = Depends(require_admin)):
                       FROM analytics_events WHERE {W} GROUP BY 1 ORDER BY 1""")
         staff = q(f"""SELECT username, count(*) FILTER (WHERE event = 'chat') AS chats,
                          count(*) FILTER (WHERE event = 'chat' AND intent = 'recommendation' AND status = 'ok') AS recommendations,
-                         count(*) FILTER (WHERE event = 'chat' AND intent = 'product_question') AS questions,
+                         count(*) FILTER (WHERE event = 'chat' AND intent IN ('product_question', 'open_question')) AS questions,
                          count(*) FILTER (WHERE event = 'feedback' AND intent = 'sold') AS sold,
                          to_char(max(at), 'YYYY-MM-DD HH24:MI') AS last_active
                       FROM analytics_events WHERE {W} AND username IS NOT NULL GROUP BY 1 ORDER BY chats DESC LIMIT 50""")

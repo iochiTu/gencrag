@@ -89,10 +89,10 @@ MEDICAL = [(r"\btreats?\b", "helps with"), (r"\btreating\b", "helping with"), (r
            (r"\bheals?\b", "soothes"), (r"\beliminates?\b", "reduces"), (r"\bclinically proven\b", "formulated")]
 
 
-def sanitize(text: str) -> str:
+def sanitize(text: str, limit: int = 300) -> str:
     for pat, rep in MEDICAL:
         text = re.sub(pat, rep, text, flags=re.I)
-    return text.strip()[:300]
+    return text.strip()[:limit]
 
 
 def template_reason(c: dict, profile: CustomerProfile) -> str:

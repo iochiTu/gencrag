@@ -163,6 +163,39 @@ def test_product_matching(client):
         assert match_products(conn, "dry skin with redness, wants a serum") == []
 
 
+@pytest.mark.parametrize(("message", "open_q"), [
+    ("Which of your products have niacinamide?", True), ("What is an essence?", True),
+    ("Where are your products made?", True), ("What do you recommend for dry skin?", False),
+    ("What about sensitive skin?", False), ("Combination skin, breakouts, under $30", False),
+    ("Any other options?", False),
+])
+def test_open_question_routing(message, open_q):
+    from app.chat import is_open_question
+    assert is_open_question(message) is open_q
+
+
+@DB
+def test_open_questions_answer_then_recommend(client):
+    from app.db import connect
+    from app.chat import catalog_search
+    from tests.conftest import staff_login
+    with connect() as conn:
+        assert {"TN-001", "SR-002"} <= set(catalog_search(conn, "which of your products contain niacinamide?"))
+        assert catalog_search(conn, "what do your products do?") == []
+    staff_login(client, "open-q", "open-q-password-1")
+    conv, m = say(client, "Which of your products contain niacinamide?")
+    p = m["payload"]
+    assert p["type"] == "products" and m["log_id"] and "From our range" in m["content"]
+    assert {"TN-001", "SR-002"} & {c["sku"] for c in p["products"]} and all(c["reason"] for c in p["products"])
+    # a safety fact in a question is remembered, and recommendations respect it
+    conv, m = say(client, "She is pregnant, which ingredients should she avoid?", conv)
+    assert "SR-003" not in [c["sku"] for c in m["payload"]["products"]]
+    conv, m = say(client, "Does retinol help with fine lines?", conv)
+    assert m["payload"]["products"] and "SR-003" not in [c["sku"] for c in m["payload"]["products"]]
+    conv, m = say(client, "Dry skin, recommend a routine", conv)
+    assert m["payload"]["type"] == "recommendation" and "Pregnancy-safe" in m["payload"]["profile_chips"]
+
+
 @DB
 def test_admin_analytics_and_csv(client):
     client.cookies.clear()
